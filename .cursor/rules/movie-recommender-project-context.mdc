@@ -1,0 +1,277 @@
+---
+description: Project context for the MovieLens recommender system
+globs:
+  - "**/*"
+alwaysApply: true
+---
+
+# MovieLens Recommender Project Context
+
+This project is an end-to-end movie recommender system built using the MovieLens dataset.
+
+## Goals
+
+- Build a **realistic ML system**, not just a notebook model — suitable for a Machine Learning Engineer resume and interviews.
+- Deliver the **core product flow**: user selects 5 liked movies → OpenSearch retrieves similar candidates → PyTorch ranks candidates → return top-K recommendations.
+- Demonstrate breadth across **recommender systems, streaming data, vector search, neural networks, data processing, deployment**, and eventually monitoring.
+- Ship a **clean, working MVP** first; improve incrementally rather than over-engineering upfront.
+- Follow the **12-step roadmap** in Project Progress below.
+
+## Non-goals
+
+- **Rebuilding the baseline recommender** — a simple one already exists from a prior project; do not rebuild unless explicitly requested.
+- **Production-scale infrastructure on day one** — no Kubernetes, full CI/CD, or finalized observability stack in the MVP.
+- **Exploration/randomness in candidate generation** — defer until after the core retrieval + ranking path works.
+- **Implementing every evaluation metric immediately** — offline (Precision@K, NDCG, etc.) and online (latency, throughput) metrics are future work unless a step calls for them.
+- **Real live user traffic** — MovieLens historical data simulates streaming events; that is intentional and acceptable for this project.
+
+## Constraints
+
+- **Dataset:** MovieLens (ml-25m): `ratings.csv`, `movies.csv`, `tags.csv`, `links.csv`, `genome-scores.csv`, `genome-tags.csv`.
+- **Tech stack:** pandas (processing), Kafka (streaming), OpenSearch (vectors), PyTorch (ranking), FastAPI (API), Docker (deployment), PostgreSQL (structured storage when needed).
+- **Storage split:** OpenSearch for movie embeddings and vector search; PostgreSQL for structured data (users, ratings, logs, features) when needed.
+- **Scope:** Prefer clarity, modularity, and production-inspired structure **without unnecessary complexity**.
+- **Model complexity:** Start with a simple PyTorch ranking model; architecture can evolve over time.
+- **Design for extension:** Structure code and services so CI/CD, Kubernetes, and observability can be added later without major rewrites.
+
+## Success Criteria
+
+The project is on track when:
+
+- [ ] A user can submit 5 liked movies (with ratings) via an API and receive sensible top-K recommendations.
+- [ ] Similar movies are retrieved via **vector search in OpenSearch**, not brute-force lookup.
+- [ ] A **PyTorch model** ranks candidates using user and movie features — not a hard-coded sort.
+- [ ] Rating events flow through a **Kafka pipeline** (simulated from MovieLens, with a clear path to a live API later).
+- [ ] Services run via **Docker Compose** (or equivalent) with reproducible local setup.
+- [ ] The repo tells a clear story on a resume: data → streaming → features → embeddings → retrieval → ranking → API.
+
+## Project Progress
+
+**Current step: 1** — Load and explore MovieLens data with pandas.
+
+Tick steps off as they are completed. When finishing a step, mark it `[x]`, set **Current step** to the next incomplete step, and add a brief note if useful (e.g. key file or module).
+
+- [ ] **1. Load and explore MovieLens data with pandas** *(in progress — `data_analysis/initial_exploration.ipynb`, ml-25m dataset on disk)*
+- [ ] **2. Simulate rating events from `ratings.csv`**
+- [ ] **3. Add Kafka for streaming ratings**
+- [ ] **4. Feature engineering with pandas (optionally store in PostgreSQL)**
+- [ ] **5. Build movie embeddings and store them in OpenSearch**
+- [ ] **6. Implement vector search for similar movies**
+- [ ] **7. Build a simple PyTorch ranking model**
+- [ ] **8. Create an API for user-selected movies and top K recommendations**
+- [ ] **9. Containerize with Docker**
+- [ ] **10. Add PostgreSQL if structured storage is needed**
+- [ ] **11. Add monitoring/observability**
+- [ ] **12. Consider CI/CD and Kubernetes**
+
+A simple baseline recommender already exists from a prior project — do not rebuild unless explicitly requested.
+
+## Core Product Flow
+
+A user selects 5 movies they like and provides ratings/preferences for them.
+
+The system uses those selected movies to:
+
+1. Fetch similar candidate movies using vector search.
+2. Combine user preference information and movie information.
+3. Pass this data into a PyTorch neural network.
+4. Recommend the top K movies to the user.
+
+The recommendation flow should be practical and system-design oriented, not only model-focused.
+
+## Dataset
+
+Use the MovieLens dataset.
+
+Important dataset files may include:
+
+- `ratings.csv`
+- `movies.csv`
+- `tags.csv`
+- `links.csv`
+- `genome-scores.csv`
+- `genome-tags.csv`
+
+The ratings dataset should be treated as event data and streamed into the system using Kafka.
+
+## Streaming Design
+
+MovieLens ratings should be converted into simulated streaming events.
+
+Kafka will be used to stream rating events into the system.
+
+Each rating event may contain:
+
+- user ID
+- movie ID
+- rating
+- timestamp
+
+This makes the project more realistic because real recommender systems often receive user interactions continuously.
+
+The model may later support periodic retraining based on newly collected ratings.
+
+## Storage
+
+Use OpenSearch as the vector database.
+
+Movie information should be embedded and stored in OpenSearch.
+
+Movie information may include:
+
+- title
+- genres
+- tags
+- genome tag relevance
+- external metadata if added later
+
+OpenSearch should support vector search for retrieving similar movies.
+
+If another database is needed, prefer PostgreSQL.
+
+PostgreSQL can be used for structured data such as:
+
+- users
+- ratings
+- movie metadata
+- recommendation logs
+- model input/output records
+
+## Candidate Generation
+
+When a user provides movies they like, the system should first fetch similar movies from OpenSearch.
+
+This retrieved set acts as candidate movies.
+
+Later, we may add randomness/exploration so recommendations are not always too deterministic.
+
+Do not over-engineer randomness yet. Leave it as a future design decision.
+
+## Ranking Model
+
+Use a neural network built with PyTorch.
+
+The PyTorch model should rank or score candidate movies for the user.
+
+The model input may include:
+
+- user preference features
+- selected liked movies
+- movie embeddings
+- movie genres
+- rating-derived features
+- candidate movie metadata
+
+The exact architecture can evolve over time.
+
+Start simple and improve gradually.
+
+## Data Processing
+
+Use pandas for data cleaning, exploration, feature engineering, and batch processing.
+
+Pandas can be used to:
+
+- load MovieLens CSV files
+- inspect missing values
+- merge ratings with movie metadata
+- create training datasets
+- prepare candidate/ranking features
+- simulate streaming input from historical timestamps
+
+## Deployment and Engineering
+
+Use Docker for containerizing services.
+
+Potential services may include:
+
+- Kafka
+- OpenSearch
+- backend API
+- model service
+- PostgreSQL
+- frontend, if added later
+
+CI/CD may be added later.
+
+Kubernetes may be added later.
+
+Do not assume Kubernetes or CI/CD are required immediately, but design the project so they can be added cleanly.
+
+## Possible Backend
+
+The backend can expose APIs such as:
+
+- submit selected movies and ratings
+- fetch recommendations
+- ingest rating events
+- retrieve similar movies
+- trigger model inference
+- inspect health/status
+
+FastAPI is a good default choice if a backend framework is needed.
+
+## Monitoring and Observability
+
+Monitoring and observability will be added later.
+
+Potential tools may include:
+
+- Prometheus
+- Grafana
+- OpenTelemetry
+- logging
+- model/data drift checks
+- recommendation quality metrics
+
+Do not finalize the observability stack yet.
+
+Leave room for future design.
+
+## Evaluation Ideas
+
+Offline recommender evaluation may include:
+
+- Precision@K
+- Recall@K
+- NDCG@K
+- MAP@K
+
+Online/system metrics may include:
+
+- latency
+- throughput
+- error rate
+- recommendation request volume
+- cost per prediction
+- model inference time
+
+These do not all need to be implemented immediately.
+
+## Project Philosophy
+
+Build this project incrementally.
+
+Prefer a clean, working MVP over an over-engineered system.
+
+The project should be useful for a resume and ML engineering interviews.
+
+When suggesting code or architecture, prioritize:
+
+- clarity
+- modularity
+- realistic ML system design
+- practical tradeoffs
+- beginner-friendly explanations
+- production-inspired structure without unnecessary complexity
+
+## Important Design Reminder
+
+The main user-facing flow is:
+
+User selects 5 liked movies
+-> system retrieves similar movies from OpenSearch
+-> candidate movies are passed with user/movie features into a PyTorch model
+-> system returns top K recommendations.
+
+Keep this flow in mind when generating code, suggesting architecture, or creating files.
