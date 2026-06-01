@@ -25,16 +25,19 @@ services:
 
   producer:
     build:
-      context: ./services/producer
-      dockerfile: docker/Dockerfile.dev
+      context: ./services
+      dockerfile: producer/docker/Dockerfile.dev
     container_name: rating-producer
     env_file:
       - ./services/producer/.env
+    environment:
+      PYTHONPATH: /app
     depends_on:
       kafka:
         condition: service_healthy
     volumes:
-      - ./services/producer/src:/app/src:ro
+      - ./services/producer/src:/app/producer/src:ro
+      - ./services/shared:/app/shared:ro
       - ./datasets:/data:ro
     networks:
       - movierec
