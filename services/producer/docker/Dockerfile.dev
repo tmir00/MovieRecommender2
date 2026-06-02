@@ -1,0 +1,19 @@
+# Dev image for the rating-event producer (Python only).
+# Build context: ./services (see docker-compose.yml).
+# Kafka runs as the separate `kafka` service in docker-compose.yml at the repo root.
+
+FROM python:3.12-slim-bookworm
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app
+
+COPY producer/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY producer/src/ ./producer/src/
+COPY shared/ ./shared/
+
+CMD ["python", "producer/src/producer.py"]

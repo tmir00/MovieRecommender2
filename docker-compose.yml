@@ -1,0 +1,66 @@
+# Local stack: Kafka broker + dataset producers (dev).
+# Config: root `.env` (infra/Kafka) + `services/producer/.env.ratings` / `.env.tags`
+# Copy from `.env.*.example` files before first run.
+#
+# Run both streams:  docker compose --profile stream up --build
+# Ratings only:       docker compose --profile ratings up --build
+# Tags only:          docker compose --profile tags up --build
+
+x-producer: &producer
+  build:
+    context: ./services
+    dockerfile: producer/docker/Dockerfile.dev
+  environment:
+    PYTHONPATH: /app
+  depends_on:
+    kafka:
+      condition: service_healthy
+  volumes:
+    - ./services/producer/src:/app/producer/src:ro
+    - ./services/shared:/app/shared:ro
+    - ./datasets:/data:ro
+  networks:
+    - movierec
+
+services:
+  kafka:
+    image: apache/kafka:3.8.1
+    container_name: kafka
+    env_file:
+      - .env
+    ports:
+      - "${KAFKA_HOST_PORT}:9094"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 6
+      start_period: 40s
+    networks:
+      - movierec
+
+  producer-ratings:
+    <<: *producer
+    container_name: producer-ratings
+    profiles:
+      - stream
+      - ratings
+    env_file:
+      - ./services/producer/.env.ratings
+
+  producer-tags:
+    <<: *producer
+    container_name: producer-tags
+    profiles:
+      - stream
+      - tags
+    env_file:
+      - ./services/producer/.env.tags
+
+networks:
+  movierec:
+    driver: bridge
