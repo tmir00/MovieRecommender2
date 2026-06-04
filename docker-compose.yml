@@ -1,10 +1,12 @@
-# Local stack: Kafka broker + dataset producers (dev).
-# Config: root `.env` (infra/Kafka) + `services/producer/.env.ratings` / `.env.tags`
+# Local stack: Kafka + Postgres + producers + consumer (dev).
+# Config: root `.env` (infra/Kafka/Postgres) + per-service env under `services/*/`
 # Copy from `.env.*.example` files before first run.
 #
-# Run both streams:  docker compose --profile stream up --build
-# Ratings only:       docker compose --profile ratings up --build
-# Tags only:          docker compose --profile tags up --build
+# Run stack + consumer:  docker compose --profile stream up --build
+# Ratings only:         docker compose --profile ratings up --build
+# Tags only:            docker compose --profile tags up --build
+# Migrations run automatically via the `migrate` service before consumers start.
+# Consumer health: Compose probes GET /health/live (see services/consumer/.env.example for K8s mapping).
 
 x-producer: &producer
   build:
@@ -21,6 +23,45 @@ x-producer: &producer
     - ./datasets:/data:ro
   networks:
     - movierec
+
+x-consumer-image: &consumer-image
+  build:
+    context: ./services
+    dockerfile: consumer/docker/Dockerfile.dev
+  environment:
+    PYTHONPATH: /app
+    POSTGRES_HOST: postgres
+    DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-movierec}:${POSTGRES_PASSWORD:-movierec}@postgres:5432/${POSTGRES_DB:-movierec}
+    HEALTH_PORT: "8080"
+  volumes:
+    - ./services/consumer/src:/app/consumer/src:ro
+    - ./services/consumer/alembic:/app/consumer/alembic:ro
+    - ./services/shared:/app/shared:ro
+  networks:
+    - movierec
+
+x-consumer: &consumer
+  <<: *consumer-image
+  restart: unless-stopped
+  expose:
+    - "8080"
+  healthcheck:
+    test:
+      [
+        "CMD-SHELL",
+        "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health/live')\"",
+      ]
+    interval: 30s
+    timeout: 5s
+    retries: 3
+    start_period: 45s
+  depends_on:
+    kafka:
+      condition: service_healthy
+    postgres:
+      condition: service_healthy
+    migrate:
+      condition: service_completed_successfully
 
 services:
   kafka:
@@ -43,6 +84,47 @@ services:
     networks:
       - movierec
 
+  postgres:
+    image: postgres:17-alpine
+    container_name: postgres
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-movierec}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-movierec}
+      POSTGRES_DB: ${POSTGRES_DB:-movierec}
+    ports:
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - movierec
+
+  migrate:
+    <<: *consumer-image
+    container_name: migrate
+    profiles:
+      - stream
+      - ratings
+      - tags
+    restart: "no"
+    env_file:
+      - .env
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   producer-ratings:
     <<: *producer
     container_name: producer-ratings
@@ -61,6 +143,29 @@ services:
     env_file:
       - ./services/producer/.env.tags
 
+  consumer-ratings:
+    <<: *consumer
+    container_name: consumer-ratings
+    profiles:
+      - stream
+      - ratings
+    env_file:
+      - .env
+      - ./services/consumer/.env.ratings
+
+  consumer-tags:
+    <<: *consumer
+    container_name: consumer-tags
+    profiles:
+      - stream
+      - tags
+    env_file:
+      - .env
+      - ./services/consumer/.env.tags
+
 networks:
   movierec:
     driver: bridge
+
+volumes:
+  postgres_data:
