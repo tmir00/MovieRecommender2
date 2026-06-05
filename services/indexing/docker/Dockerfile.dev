@@ -1,0 +1,20 @@
+# Dev image for OpenSearch movie catalog indexing (one-shot job).
+# Build context: ./services (see docker-compose.yml).
+
+FROM python:3.12-slim-bookworm
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app
+
+COPY indexing/requirements.txt ./indexing/
+RUN pip install --no-cache-dir -r indexing/requirements.txt
+
+COPY indexing/src/ ./indexing/src/
+COPY shared/ ./shared/
+
+WORKDIR /app/indexing
+
+CMD ["python", "src/run_pipeline.py"]

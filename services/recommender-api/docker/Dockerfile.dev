@@ -1,0 +1,20 @@
+# Dev image for the recommender API (search + catalog).
+# Build context: ./services (see docker-compose.yml).
+
+FROM python:3.12-slim-bookworm
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app
+
+COPY recommender-api/requirements.txt ./recommender-api/
+RUN pip install --no-cache-dir -r recommender-api/requirements.txt
+
+COPY recommender-api/src/ ./recommender-api/src/
+COPY shared/ ./shared/
+
+WORKDIR /app/recommender-api
+
+CMD ["python", "src/main.py"]

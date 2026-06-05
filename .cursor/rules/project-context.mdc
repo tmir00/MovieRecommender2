@@ -1,0 +1,76 @@
+---
+description: MovieRecommender2 roadmap and architecture status
+alwaysApply: true
+---
+
+# MovieRecommender2 — project context
+
+## Goal
+
+Stream MovieLens 25M dataset events through Kafka, persist interaction data in Postgres, and index movie catalog features in OpenSearch for search/recommendation.
+
+## Dataset (`datasets/ml-25m/`, mounted at `/data` in Compose)
+
+| File | Schema | Status |
+|------|--------|--------|
+| `ratings.csv` | userId, movieId, rating, timestamp | **In pipeline** (producer → Kafka → consumer → Postgres) |
+| `tags.csv` | userId, movieId, tag, timestamp | **In pipeline** |
+| `movies.csv` | movieId, title, genres (~62k rows) | **Bootstrap** via `index-catalog` → OpenSearch |
+
+## Architecture
+
+```text
+ratings/tags → Kafka producer → Kafka → consumer → Postgres (events)
+
+movies.csv → index-catalog (Job) → OpenSearch movies_vN → alias `movies`
+
+recommender-api POST /movies → Postgres catalog_movies (pending_sync=true)
+index-sync (Job) → bulk upsert to OpenSearch alias
+
+recommender-api GET /search → OpenSearch alias
+```
+
+**Interview line:** CSV bootstraps the search index once; API-added catalog lives in Postgres as source of truth and syncs incrementally to OpenSearch. User events still stream via Kafka.
+
+## Current stack
+
+- **Kafka**, **Postgres 17**, **OpenSearch 2.19**
+- **Producer / consumer** — ratings & tags; DLQ; health on `:8080`
+- **Indexing** — `index-catalog` (CSV batch), `index-sync` (Postgres → OpenSearch)
+- **Postgres** — `ratings_events`, `tag_events`, `dead_letter_events`, **`catalog_movies`**
+- **recommender-api** — `GET /search`, `POST /movies`, `GET /catalog/pending-sync`, `/health` on `:8000`
+
+### Compose profiles
+
+| Profile | Services |
+|---------|----------|
+| `stream` / `ratings` / `tags` | Kafka pipeline |
+| `catalog` | `index-catalog`, `index-sync`, `create-movie-index`, `index-movies` |
+| `api` | `recommender-api` (+ `migrate`) |
+
+**Runbook:**
+1. `docker compose --profile catalog up --build index-catalog` (OpenSearch bootstrap)
+2. `docker compose --profile api up --build recommender-api`
+3. `POST /movies` → `docker compose --profile catalog run index-sync`
+
+## Deferred
+
+- `GET /recommend`, `POST /rate`
+- Vector embeddings / `/search/similar`
+- Postgres seed of ML-25m into `catalog_movies` (CSV only seeds OpenSearch today)
+
+## Repo layout
+
+```
+services/producer/
+services/consumer/
+services/indexing/src/
+services/recommender-api/src/
+services/shared/         # logging_config.py, movie_document.py
+docker-compose.yml
+```
+
+## Conventions
+
+- Per-service env under `services/*/.env` (+ root `.env` for infra)
+- Do not commit real `.env` files or secrets

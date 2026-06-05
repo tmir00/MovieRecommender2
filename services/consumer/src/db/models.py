@@ -12,7 +12,9 @@ from sqlalchemy import (
     Text,
     false,
     func,
+    true,
 )
+from sqlalchemy.dialects.postgresql import ARRAY
 
 metadata = MetaData()
 
@@ -74,4 +76,30 @@ dead_letter_events = Table(
     Column("resolved", Boolean, server_default=false(), nullable=False),
     Column("resolved_at", DateTime(timezone=True), nullable=True),
     Column("resolution_notes", Text, nullable=True),
+)
+
+catalog_movies = Table(
+    "catalog_movies",
+    metadata,
+    Column("movie_id", Integer, primary_key=True),
+    Column("title", Text, nullable=False),
+    Column("genres", ARRAY(Text), nullable=False),
+    Column("year", Integer, nullable=True),
+    Column("tags", ARRAY(Text), nullable=False),
+    Column("active", Boolean, server_default=true(), nullable=False),
+    Column("pending_opensearch_sync", Boolean, server_default=true(), nullable=False),
+    Column("synced_to_opensearch_at", DateTime(timezone=True), nullable=True),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    ),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    ),
+    Column("pipeline_version", Text, server_default="v1", nullable=False),
 )

@@ -1,10 +1,14 @@
-# Local stack: Kafka + Postgres + producers + consumer (dev).
+# Local stack: Kafka + Postgres + OpenSearch + producers + consumer + catalog indexer (dev).
 # Config: root `.env` (infra/Kafka/Postgres) + per-service env under `services/*/`
 # Copy from `.env.*.example` files before first run.
 #
 # Run stack + consumer:  docker compose --profile stream up --build
 # Ratings only:         docker compose --profile ratings up --build
 # Tags only:            docker compose --profile tags up --build
+# Index movie catalog (CSV bootstrap):  docker compose --profile catalog up --build index-catalog
+# Sync API catalog to OpenSearch:      docker compose --profile catalog run --build index-sync
+# Recommender API:                     docker compose --profile api up --build recommender-api
+#   (run index-catalog first so the `movies` alias exists; run migrate for catalog_movies table)
 # Migrations run automatically via the `migrate` service before consumers start.
 # Consumer health: Compose probes GET /health/live (see services/consumer/.env.example for K8s mapping).
 
@@ -36,6 +40,35 @@ x-consumer-image: &consumer-image
   volumes:
     - ./services/consumer/src:/app/consumer/src:ro
     - ./services/consumer/alembic:/app/consumer/alembic:ro
+    - ./services/shared:/app/shared:ro
+  networks:
+    - movierec
+
+x-indexing-image: &indexing-image
+  build:
+    context: ./services
+    dockerfile: indexing/docker/Dockerfile.dev
+  environment:
+    PYTHONPATH: /app
+    DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-movierec}:${POSTGRES_PASSWORD:-movierec}@postgres:5432/${POSTGRES_DB:-movierec}
+  volumes:
+    - ./services/indexing/src:/app/indexing/src:ro
+    - ./services/shared:/app/shared:ro
+    - ./datasets:/data:ro
+  networks:
+    - movierec
+
+x-recommender-api: &recommender-api
+  build:
+    context: ./services
+    dockerfile: recommender-api/docker/Dockerfile.dev
+  environment:
+    PYTHONPATH: /app
+    DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-movierec}:${POSTGRES_PASSWORD:-movierec}@postgres:5432/${POSTGRES_DB:-movierec}
+  ports:
+    - "${RECOMMENDER_API_HOST_PORT:-8000}:8000"
+  volumes:
+    - ./services/recommender-api/src:/app/recommender-api/src:ro
     - ./services/shared:/app/shared:ro
   networks:
     - movierec
@@ -110,6 +143,41 @@ services:
     networks:
       - movierec
 
+  opensearch:
+    image: opensearchproject/opensearch:2.19.1
+    container_name: opensearch
+    env_file:
+      - .env
+    environment:
+      cluster.name: movierec-opensearch
+      node.name: opensearch
+      discovery.type: single-node
+      # Docker Desktop on Windows/macOS cannot use memlock reliably.
+      bootstrap.memory_lock: "false"
+      OPENSEARCH_JAVA_OPTS: ${OPENSEARCH_JAVA_OPTS:--Xms512m -Xmx512m}
+      DISABLE_SECURITY_PLUGIN: ${OPENSEARCH_DISABLE_SECURITY_PLUGIN:-true}
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "${OPENSEARCH_HOST_PORT:-9200}:9200"
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s || exit 1",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 8
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - movierec
+
   migrate:
     <<: *consumer-image
     container_name: migrate
@@ -117,6 +185,8 @@ services:
       - stream
       - ratings
       - tags
+      - api
+      - catalog
     restart: "no"
     env_file:
       - .env
@@ -163,9 +233,89 @@ services:
       - .env
       - ./services/consumer/.env.tags
 
+  index-catalog:
+    <<: *indexing-image
+    container_name: index-catalog
+    profiles:
+      - catalog
+    restart: "no"
+    env_file:
+      - .env
+      - ./services/indexing/.env
+    command: ["python", "src/run_pipeline.py"]
+    depends_on:
+      opensearch:
+        condition: service_healthy
+
+  create-movie-index:
+    <<: *indexing-image
+    container_name: create-movie-index
+    profiles:
+      - catalog
+    restart: "no"
+    env_file:
+      - .env
+      - ./services/indexing/.env
+    command: ["python", "src/create_movies_index.py"]
+    depends_on:
+      opensearch:
+        condition: service_healthy
+
+  index-movies:
+    <<: *indexing-image
+    container_name: index-movies
+    profiles:
+      - catalog
+    restart: "no"
+    env_file:
+      - .env
+      - ./services/indexing/.env
+    command: ["python", "src/load_movies_to_opensearch.py"]
+    depends_on:
+      opensearch:
+        condition: service_healthy
+      create-movie-index:
+        condition: service_completed_successfully
+
+  index-sync:
+    <<: *indexing-image
+    container_name: index-sync
+    profiles:
+      - catalog
+    restart: "no"
+    env_file:
+      - .env
+      - ./services/indexing/.env
+    command: ["python", "src/run_sync_pipeline.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  recommender-api:
+    <<: *recommender-api
+    container_name: recommender-api
+    profiles:
+      - api
+    restart: unless-stopped
+    env_file:
+      - .env
+      - ./services/recommender-api/.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
 networks:
   movierec:
     driver: bridge
 
 volumes:
   postgres_data:
+  opensearch_data:
