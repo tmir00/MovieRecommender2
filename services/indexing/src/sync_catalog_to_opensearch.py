@@ -9,10 +9,11 @@ import logging
 from config import IndexingConfig
 from opensearchpy import OpenSearch
 from opensearchpy.helpers import bulk
+from build_index_document import CatalogRowFields, build_index_documents_batch
+from embedder_client import EmbedderClient
 from opensearch_client import get_opensearch_client
 from shared.logging_config import configure_logging
 from shared.db.engine import create_engine_from_url
-from shared.movie_document import build_movie_document
 from shared.db.catalog import (
     fetch_pending_catalog_movies,
     mark_catalog_movies_synced,
@@ -30,7 +31,7 @@ def _ensure_alias_ready(client: OpenSearch, config: IndexingConfig) -> None:
         )
 
 
-def sync_catalog(config: IndexingConfig, logger: logging.Logger) -> int:
+def sync_catalog(config: IndexingConfig, logger: logging.Logger, embedder: EmbedderClient) -> int:
     """
     Syncronize the pending catalog rows from the database to the OpenSearch cluster.
 
@@ -42,6 +43,7 @@ def sync_catalog(config: IndexingConfig, logger: logging.Logger) -> int:
     ============================ Arguments ============================
     config: The configuration for the indexing run.
     logger: The logger to use.
+    embedder: Client for the embedder HTTP API.
 
     ============================ Returns ============================
     int - The total number of movies synced to the OpenSearch cluster.
@@ -69,32 +71,30 @@ def sync_catalog(config: IndexingConfig, logger: logging.Logger) -> int:
             if not rows:
                 break
 
-            # Initialize a list to store the actions to be sent to the OpenSearch cluster.
-            actions = []
-            # Initialize a list to store the movie IDs to be marked as synced.
-            movie_ids = []
-            # Iterate over each row in the batch.
-            for row in rows:
-                # Build the movie document from the row and add it to the actions list.
-                movie_id = row["movie_id"]
-                doc = build_movie_document(
-                    movie_id=movie_id,
+            # Build index documents with embeddings for the whole batch.
+            catalog_rows = [
+                CatalogRowFields(
+                    movie_id=row["movie_id"],
                     title=row["title"],
-                    genres=row["genres"],
+                    genres=list(row["genres"] or []),
                     year=row["year"],
-                    tags=row["tags"],
-                    pipeline_version=row["pipeline_version"],
+                    tags=list(row["tags"] or []),
                 )
+                for row in rows
+            ]
+            docs = build_index_documents_batch(embedder, config, catalog_rows)
+            movie_ids = [row["movie_id"] for row in rows]
 
+            actions = []
+            for row, doc in zip(rows, docs):
+                doc["pipeline_version"] = row["pipeline_version"]
                 actions.append(
                     {
                         "_index": config.movies_alias,
-                        "_id": str(movie_id),
+                        "_id": str(row["movie_id"]),
                         "_source": doc,
                     }
                 )
-
-                movie_ids.append(movie_id)
 
             # Send the actions to the OpenSearch cluster in batches.
             # Use the Bulk API to send the actions to the OpenSearch cluster.
@@ -166,8 +166,10 @@ def main() -> None:
         },
     )
 
+    embedder = EmbedderClient(config.embedder_url)
+
     # Sync the catalog to the OpenSearch cluster.
-    synced = sync_catalog(config, logger)
+    synced = sync_catalog(config, logger, embedder)
     # Log the completion of the catalog sync job.
     logger.info(
         "Catalog sync completed",

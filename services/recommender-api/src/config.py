@@ -20,6 +20,8 @@ class RecommenderApiConfig:
     api_port: int
     pipeline_version: str
     catalog_indexer_url: str
+    embedder_url: str
+    embedding_dimension: int
 
     @classmethod
     def from_env(cls) -> RecommenderApiConfig:
@@ -34,4 +36,6 @@ class RecommenderApiConfig:
             catalog_indexer_url=os.environ.get(
                 "CATALOG_INDEXER_URL", "http://catalog-indexer-api:8101"
             ),
+            embedder_url=os.environ.get("EMBEDDER_URL", "http://embedder:8100"),
+            embedding_dimension=int(os.environ.get("EMBEDDING_DIMENSION", "384")),
         )

@@ -9,17 +9,19 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
-from api.routes.live_index import create_live_index_router
 from config import IndexingConfig
+from health import opensearch_ready
+from shared.db.health import ping_postgres
+from embedder_client import EmbedderClient
 from opensearch_client import get_opensearch_client
 from shared.db.engine import create_engine_from_url
-from shared.db.health import ping_postgres
-from health import opensearch_ready
+from api.routes.live_index import create_live_index_router
 
 
 config = IndexingConfig.from_env()
 engine = create_engine_from_url(config.database_url)
 os_client = get_opensearch_client(config)
+embedder = EmbedderClient(config.embedder_url)
 
 
 @asynccontextmanager
@@ -39,7 +41,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.include_router(create_live_index_router(config, engine, os_client))
+app.include_router(create_live_index_router(config, engine, os_client, embedder))
 
 
 @app.get("/health")
@@ -51,16 +53,23 @@ def health() -> dict[str, str]:
 def health_ready() -> JSONResponse:
     """
     Health check endpoint for the catalog indexer API.
-    Check if the database and OpenSearch are reachable.
+    Check if the database, OpenSearch, and embedder are reachable.
 
     ============================ Returns ============================
     A JSON response with the status of the health check.
     """
-    if ping_postgres(engine) and opensearch_ready(os_client, config):
+    if (
+        ping_postgres(engine)
+        and opensearch_ready(os_client, config)
+        and embedder.ping()
+    ):
         return JSONResponse(content={"status": "ready"})
     return JSONResponse(
         status_code=503,
-        content={"status": "not_ready", "reason": "postgres_or_opensearch_unavailable"},
+        content={
+            "status": "not_ready",
+            "reason": "postgres_opensearch_or_embedder_unavailable",
+        },
     )
 
 

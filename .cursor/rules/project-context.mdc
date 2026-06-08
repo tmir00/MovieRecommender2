@@ -22,42 +22,47 @@ Stream MovieLens 25M dataset events through Kafka, persist interaction data in P
 ```text
 ratings/tags → Kafka producer → Kafka → consumer → Postgres (events)
 
-movies.csv → index-catalog (Job) → OpenSearch movies_vN → alias `movies`
+movies.csv → index-catalog (Job) → OpenSearch movies_v2 (kNN) → alias `movies`
+              ↑ embedder :8100 (all-MiniLM-L6-v2, 384d)
 
 recommender-api POST /movies → Postgres catalog_movies (pending_sync=true)
-catalog-indexer-api POST /index/movie/{id} → OpenSearch (immediate sync via ?sync=immediate=true)
-index-sync (Job) → bulk upsert pending rows to OpenSearch alias
+catalog-indexer-api POST /index/movie/{id} → embedder → OpenSearch (immediate sync)
+index-sync (Job) → embedder → bulk upsert pending rows to OpenSearch alias
 
-recommender-api GET /search → OpenSearch alias
+recommender-api GET /search → OpenSearch alias (lexical)
+recommender-api GET /search/similar → embedder + OpenSearch kNN
 ```
 
-**Interview line:** CSV bootstraps the search index once; API-added catalog lives in Postgres as source of truth and syncs incrementally to OpenSearch. User events still stream via Kafka.
+**Interview line:** CSV bootstraps the search index once; API-added catalog lives in Postgres as source of truth and syncs incrementally to OpenSearch with embeddings. User events still stream via Kafka.
 
 ## Current stack
 
 - **Kafka**, **Postgres 17**, **OpenSearch 2.19**
 - **Producer / consumer** — ratings & tags; DLQ; health on `:8080`
-- **Indexing** — `index-catalog` (CSV batch), `index-sync` (Postgres → OpenSearch)
+- **Embedder** — `sentence-transformers/all-MiniLM-L6-v2`; `POST /embed`, `/health` on `:8100`
+- **Indexing** — `index-catalog` (CSV batch), `index-sync` (Postgres → OpenSearch); all writes enrich docs via `build_index_document`
 - **Postgres** — `ratings_events`, `tag_events`, `dead_letter_events`, **`catalog_movies`**
-- **recommender-api** — `GET /search`, `POST /movies`, `GET /catalog/pending-sync`, `/health` on `:8000`
+- **recommender-api** — `GET /search`, `GET /search/similar`, `POST /movies`, `GET /catalog/pending-sync`, `/health` on `:8000`
+- **catalog-indexer-api** — `POST /index/movie/{id}` on `:8101`
 
 ### Compose profiles
 
 | Profile | Services |
 |---------|----------|
 | `stream` / `ratings` / `tags` | Kafka pipeline |
-| `catalog` | `index-catalog`, `index-sync`, `create-movie-index`, `index-movies` |
-| `api` | `recommender-api`, `catalog-indexer-api` (+ `migrate`) |
+| `catalog` | `embedder`, `index-catalog`, `index-sync`, `create-movie-index`, `index-movies` |
+| `api` | `embedder`, `recommender-api`, `catalog-indexer-api` (+ `migrate`) |
 
 **Runbook:**
-1. `docker compose --profile catalog up --build index-catalog` (OpenSearch bootstrap)
-2. `docker compose --profile api up --build recommender-api`
-3. `POST /movies` → `docker compose --profile catalog run index-sync` (or `?sync=immediate=true` via catalog-indexer-api)
+1. Set `INDEX_VERSION=v2` and `RECREATE_INDEX=true` in `services/indexing/.env` when rebuilding locally
+2. `docker compose --profile catalog up --build embedder index-catalog` (embedder + full CSV reindex with vectors)
+3. `docker compose --profile api up --build recommender-api` (starts embedder, catalog-indexer-api, API)
+4. Test: `curl embedder:8100/health/ready`, `GET /search/similar?q=inception`, `POST /movies?sync=immediate=true` → `GET /search/similar?movie_id=...`
+5. Async catalog: `POST /movies` → `docker compose --profile catalog run index-sync`
 
 ## Deferred
 
 - `GET /recommend`, `POST /rate`
-- Vector embeddings / `/search/similar`
 - Postgres seed of ML-25m into `catalog_movies` (CSV only seeds OpenSearch today)
 
 ## Repo layout
@@ -65,9 +70,10 @@ recommender-api GET /search → OpenSearch alias
 ```
 services/producer/
 services/consumer/
+services/embedder/
 services/indexing/src/
 services/recommender-api/src/
-services/shared/         # logging_config.py, movie_document.py
+services/shared/         # logging_config.py, movie_document.py, db/
 docker-compose.yml
 ```
 

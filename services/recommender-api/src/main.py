@@ -11,6 +11,7 @@ from config import RecommenderApiConfig
 from contextlib import asynccontextmanager
 from fastapi.responses import JSONResponse
 from queries.search import opensearch_ready
+from clients.embedder import EmbedderClient
 from routes.search import create_search_router
 from routes.catalog import create_catalog_router
 from opensearch_client import get_opensearch_client
@@ -18,9 +19,10 @@ from clients.catalog_indexer import CatalogIndexerClient
 
 
 # Load the configuration and create the database and OpenSearch clients.
-config = RecommenderApiConfig.from_env()
 engine = get_engine()
+config = RecommenderApiConfig.from_env()
 os_client = get_opensearch_client(config)
+embedder = EmbedderClient(config.embedder_url)
 catalog_indexer = CatalogIndexerClient(config.catalog_indexer_url)
 
 # Check if the database is reachable.
@@ -55,7 +57,7 @@ app = FastAPI(
 )
 
 # Include the search and catalog routers.
-app.include_router(create_search_router(config, os_client))
+app.include_router(create_search_router(config, os_client, embedder))
 app.include_router(create_catalog_router(config, engine, catalog_indexer))
 
 # Health check endpoints.
@@ -68,16 +70,23 @@ def health() -> dict[str, str]:
 def health_ready() -> JSONResponse:
     """
     Health check endpoint for the recommender API.
-    Check if the database and OpenSearch are reachable.
-    
+    Check if the database, OpenSearch, and embedder are reachable.
+
     ============================ Returns ============================
     A JSON response with the status of the health check.
     """
-    if _postgres_ok() and opensearch_ready(os_client, config):
+    if (
+        _postgres_ok()
+        and opensearch_ready(os_client, config)
+        and embedder.ping()
+    ):
         return JSONResponse(content={"status": "ready"})
     return JSONResponse(
         status_code=503,
-        content={"status": "not_ready", "reason": "postgres_or_opensearch_unavailable"},
+        content={
+            "status": "not_ready",
+            "reason": "postgres_opensearch_or_embedder_unavailable",
+        },
     )
 
 

@@ -8,6 +8,7 @@ import logging
 
 from alias import promote_alias
 from config import IndexingConfig
+from embedder_client import EmbedderClient
 from create_movies_index import create_movies_index
 from load_movies_to_opensearch import load_movies
 from smoke_test_movies_index import run_smoke_tests
@@ -30,8 +31,10 @@ def run_pipeline(config: IndexingConfig, logger: logging.Logger) -> None:
     # Create the versioned OpenSearch index.
     create_movies_index(config, logger)
 
+    embedder = EmbedderClient(config.embedder_url)
+
     # Bulk load the movie documents into the index.
-    _, failures = load_movies(config, logger)
+    _, failures = load_movies(config, logger, embedder)
     if failures:
         raise RuntimeError(f"Bulk load had {failures} failures")
 

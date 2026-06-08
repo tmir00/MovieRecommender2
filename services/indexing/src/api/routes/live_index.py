@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
-from opensearchpy import OpenSearch
 from pydantic import BaseModel
-from sqlalchemy.engine import Engine
-
+from opensearchpy import OpenSearch
 from config import IndexingConfig
+from sqlalchemy.engine import Engine
+from embedder_client import EmbedderClient
+from fastapi import APIRouter, HTTPException
 from index_movie import index_movie_document
 from shared.db.catalog import fetch_catalog_movie_by_id, mark_catalog_movies_synced
 
@@ -21,7 +21,8 @@ class IndexMovieResponse(BaseModel):
     error: str | None = None
 
 
-def create_live_index_router(config: IndexingConfig, engine: Engine, os_client: OpenSearch) -> APIRouter:
+def create_live_index_router(config: IndexingConfig, engine: Engine, os_client: OpenSearch, \
+                                embedder: EmbedderClient) -> APIRouter:
     """
     Create the live catalog index router.
 
@@ -33,6 +34,7 @@ def create_live_index_router(config: IndexingConfig, engine: Engine, os_client: 
     config: The configuration for the catalog indexer.
     engine: The SQLAlchemy engine.
     os_client: The OpenSearch client.
+    embedder: Client for the embedder HTTP API.
 
     ============================ Returns ============================
     The live catalog index router.
@@ -67,6 +69,7 @@ def create_live_index_router(config: IndexingConfig, engine: Engine, os_client: 
         synced, error = index_movie_document(
             os_client,
             config,
+            embedder,
             movie_id=int(row["movie_id"]),
             title=row["title"],
             genres=list(row["genres"] or []),

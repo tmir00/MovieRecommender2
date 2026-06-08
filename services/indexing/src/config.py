@@ -35,6 +35,11 @@ class IndexingConfig:
     sync_batch_size: int
     catalog_indexer_host: str
     catalog_indexer_port: int
+    # Configuration for the embedder service.
+    embedder_url: str
+    embedding_model_id: str
+    embedding_dimension: int
+    embed_batch_size: int
 
     @property
     def physical_index(self) -> str:
@@ -64,6 +69,13 @@ class IndexingConfig:
             sync_batch_size=int(os.environ.get("SYNC_BATCH_SIZE", "500")),
             catalog_indexer_host=os.environ.get("CATALOG_INDEXER_HOST", "0.0.0.0"),
             catalog_indexer_port=int(os.environ.get("CATALOG_INDEXER_PORT", "8101")),
+            embedder_url=os.environ.get("EMBEDDER_URL", "http://embedder:8100"),
+            embedding_model_id=os.environ.get(
+                "EMBEDDING_MODEL_ID",
+                "sentence-transformers/all-MiniLM-L6-v2",
+            ),
+            embedding_dimension=int(os.environ.get("EMBEDDING_DIMENSION", "384")),
+            embed_batch_size=int(os.environ.get("EMBED_BATCH_SIZE", "32")),
         )
 
     def startup_log_extra(self) -> dict[str, Any]:

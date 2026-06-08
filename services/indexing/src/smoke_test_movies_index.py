@@ -97,6 +97,53 @@ def run_smoke_tests(config: IndexingConfig, logger: logging.Logger) -> None:
         extra={"read_index": read_index, "genre": "Animation"},
     )
 
+    sample_response = client.search(
+        index=read_index,
+        body={"size": 1, "query": {"match_all": {}}},
+    )
+    sample_hits = sample_response["hits"]["hits"]
+    if not sample_hits:
+        raise RuntimeError("Embedding smoke test could not sample a document")
+
+    embedding = sample_hits[0]["_source"].get("embedding")
+    if not embedding:
+        raise RuntimeError("Sample document is missing embedding field")
+    if len(embedding) != config.embedding_dimension:
+        raise RuntimeError(
+            f"Embedding dimension mismatch: got {len(embedding)}, "
+            f"expected {config.embedding_dimension}"
+        )
+
+    logger.info(
+        "Embedding field smoke test passed",
+        extra={
+            "read_index": read_index,
+            "embedding_dimension": len(embedding),
+        },
+    )
+
+    knn_response = client.search(
+        index=read_index,
+        body={
+            "size": 3,
+            "query": {
+                "knn": {
+                    "embedding": {
+                        "vector": embedding,
+                        "k": 3,
+                    }
+                }
+            },
+        },
+    )
+    if not knn_response["hits"]["hits"]:
+        raise RuntimeError("kNN smoke test returned no hits")
+
+    logger.info(
+        "kNN vector search smoke test passed",
+        extra={"read_index": read_index, "knn_hits": len(knn_response["hits"]["hits"])},
+    )
+
 
 def main() -> None:
     logger = configure_logging(os.environ.get("LOGGER_NAME", "movie-indexer"))

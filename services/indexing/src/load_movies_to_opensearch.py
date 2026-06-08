@@ -8,50 +8,55 @@ import logging
 import pandas as pd
 
 from typing import Dict, Any
+from build_index_document import build_index_documents_batch
 from config import IndexingConfig
+from embedder_client import EmbedderClient
 from opensearchpy import OpenSearch
 from opensearchpy.helpers import bulk
-from transform import row_to_document
+from transform import row_to_index_fields
 from opensearch_client import get_opensearch_client
 from shared.logging_config import configure_logging
 
 
-def _bulk_actions(config: IndexingConfig, row: object) -> Dict[str, Any]:
+def _rows_to_bulk_actions(config: IndexingConfig, embedder: EmbedderClient, \
+                            rows: list[object]) -> list[Dict[str, Any]]:
     """
-    Transform one movies.csv row into an OpenSearch document body.
+    Transform CSV rows into bulk actions with embedding-enriched documents.
 
     ============================ Arguments ============================
     config: The configuration for the indexing run.
-    row: The row to transform.
+    embedder: Client for the embedder HTTP API.
+    rows: movies.csv row objects from one chunk.
 
     ============================ Returns ============================
-    dict - The OpenSearch document body.
+    Bulk API action dicts for OpenSearch.
     """
-    # Transform the row into an OpenSearch document body.
-    doc = row_to_document(row, config.pipeline_version)
-    # Return the OpenSearch document body.
-    return {
-        # The index to store the document in.
-        "_index": config.physical_index,
-        # The document ID.
-        "_id": str(doc["movie_id"]),
-        # The document body.
-        "_source": doc,
-    }
+    fields = [row_to_index_fields(row) for row in rows]
+    docs = build_index_documents_batch(embedder, config, fields)
+    return [
+        {
+            "_index": config.physical_index,
+            "_id": str(doc["movie_id"]),
+            "_source": doc,
+        }
+        for doc in docs
+    ]
 
 
-def load_movies(config: IndexingConfig, logger: logging.Logger) -> tuple[int, int]:
+def load_movies(config: IndexingConfig, logger: logging.Logger, embedder: EmbedderClient) -> tuple[int, int]:
     """
     Read movies.csv in chunks and bulk index the movies into OpenSearch.
 
-    Each row is converted into a movie document and written to the physical
-    index for this run, such as "movies_v1". The function batches documents for
-    efficient bulk indexing, logs progress as it runs, and returns a summary of
-    how many rows were processed and how many indexing failures occurred.
+    Each row is converted into a movie document with an embedding vector and
+    written to the physical index for this run, such as "movies_v2". The
+    function batches documents for efficient bulk indexing, logs progress as it
+    runs, and returns a summary of how many rows were processed and how many
+    indexing failures occurred.
 
     ============================ Arguments ============================
     config: The configuration for the indexing run.
     logger: The logger to use.
+    embedder: Client for the embedder HTTP API.
 
     ============================ Returns ============================
     tuple[int, int] - The number of rows read and the number of failures.
@@ -65,29 +70,29 @@ def load_movies(config: IndexingConfig, logger: logging.Logger) -> tuple[int, in
 
     # Initialize a list to store the documents to be indexed.
     batch: list[dict] = []
+    row_buffer: list[object] = []
 
     # Read the movies.csv file in chunks of size bulk_chunk_size.
     for chunk in pd.read_csv(config.movies_csv_path, chunksize=config.bulk_chunk_size):
-        
+
         # Iterate over each row in the chunk.
         for row in chunk.itertuples(index=False):
-        
+
             # If we have reached the maximum number of movies to index, break.
             if config.max_movies > 0 and rows_read >= config.max_movies:
                 break
 
             # Increment the number of rows read.
             rows_read += 1
-            # Add the document to the batch.
-            batch.append(_bulk_actions(config, row))
+            row_buffer.append(row)
 
-            # If the batch is full, flush it to the OpenSearch index.
-            if len(batch) >= config.bulk_chunk_size:
-                # Flush the batch to the OpenSearch index and increment counters.
+            # If the batch is full, build embeddings and flush to OpenSearch.
+            if len(row_buffer) >= config.bulk_chunk_size:
+                batch = _rows_to_bulk_actions(config, embedder, row_buffer)
                 failures = _flush_batch(client, batch, logger)
                 rows_indexed += len(batch) - failures
                 total_failures += failures
-                # Empty the batch list after everything has been flushed.
+                row_buffer.clear()
                 batch.clear()
 
                 # If we have reached the log_every_n_docs threshold, log the progress.
@@ -104,10 +109,9 @@ def load_movies(config: IndexingConfig, logger: logging.Logger) -> tuple[int, in
         if config.max_movies > 0 and rows_read >= config.max_movies:
             break
 
-
-    # If there are any documents left in the batch, flush them to the OpenSearch index.
-    if batch:
-        # Flush the batch to the OpenSearch index and increment counters.
+    # If there are any rows left in the buffer, build embeddings and flush them.
+    if row_buffer:
+        batch = _rows_to_bulk_actions(config, embedder, row_buffer)
         failures = _flush_batch(client, batch, logger)
         rows_indexed += len(batch) - failures
         total_failures += failures
@@ -128,8 +132,8 @@ def _flush_batch(client: OpenSearch, batch: list[dict], logger: logging.Logger) 
     """
     Send one batch of movie documents to OpenSearch using the Bulk API.
 
-    The batch list contains dictionaries in the exact format that the Bulk API expects. 
-    This function writes them to the target index, counts any failed items, and logs an 
+    The batch list contains dictionaries in the exact format that the Bulk API expects.
+    This function writes them to the target index, counts any failed items, and logs an
     error if the batch was only partially successful.
 
     ============================ Arguments ============================
@@ -175,10 +179,11 @@ def main() -> None:
     # Configure logging and load the configuration.
     logger = configure_logging(os.environ.get("LOGGER_NAME", "movie-indexer"))
     config = IndexingConfig.from_env()
+    embedder = EmbedderClient(config.embedder_url)
     logger.info("Starting movie bulk load", extra=config.startup_log_extra())
 
     # Bulk load the movies into OpenSearch.
-    _, failures = load_movies(config, logger)
+    _, failures = load_movies(config, logger, embedder)
 
     # If there were any failures, log a critical error and exit with a non-zero status code.
     if failures:

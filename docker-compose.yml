@@ -74,6 +74,18 @@ x-recommender-api: &recommender-api
   networks:
     - movierec
 
+x-embedder: &embedder
+  build:
+    context: ./services
+    dockerfile: embedder/docker/Dockerfile.dev
+  environment:
+    PYTHONPATH: /app
+  volumes:
+    - ./services/embedder/src:/app/embedder/src:ro
+    - embedder_model_cache:/root/.cache/huggingface
+  networks:
+    - movierec
+
 x-consumer: &consumer
   <<: *consumer-image
   restart: unless-stopped
@@ -247,6 +259,8 @@ services:
     depends_on:
       opensearch:
         condition: service_healthy
+      embedder:
+        condition: service_started
 
   create-movie-index:
     <<: *indexing-image
@@ -275,6 +289,8 @@ services:
     depends_on:
       opensearch:
         condition: service_healthy
+      embedder:
+        condition: service_started
       create-movie-index:
         condition: service_completed_successfully
 
@@ -295,6 +311,21 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      embedder:
+        condition: service_started
+
+  embedder:
+    <<: *embedder
+    container_name: embedder
+    profiles:
+      - api
+      - catalog
+    restart: unless-stopped
+    env_file:
+      - ./services/embedder/.env.example
+    command: ["python", "src/main.py"]
+    expose:
+      - "8100"
 
   catalog-indexer-api:
     <<: *indexing-image
@@ -315,6 +346,8 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      embedder:
+        condition: service_started
 
   recommender-api:
     <<: *recommender-api
@@ -334,6 +367,8 @@ services:
         condition: service_completed_successfully
       catalog-indexer-api:
         condition: service_started
+      embedder:
+        condition: service_started
 
 networks:
   movierec:
@@ -342,3 +377,4 @@ networks:
 volumes:
   postgres_data:
   opensearch_data:
+  embedder_model_cache:
