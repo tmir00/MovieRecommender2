@@ -1,84 +1,105 @@
-"""Catalog write routes."""
-
-from __future__ import annotations
-
-from fastapi import APIRouter, HTTPException
-from sqlalchemy import func, insert, select
-from sqlalchemy.engine import Engine
-
-from config import RecommenderApiConfig
-from db.models import catalog_movies
-from schemas.catalog import CreateMovieRequest, MovieResponse, PendingSyncResponse
-from shared.movie_document import parse_title_year
-
-
-def _resolve_year(title: str, explicit_year: int | None) -> int | None:
-    if explicit_year is not None:
-        return explicit_year
-    _, parsed = parse_title_year(title)
-    return parsed
-
-
-def _next_movie_id(engine: Engine) -> int:
-    with engine.connect() as conn:
-        result = conn.execute(select(func.coalesce(func.max(catalog_movies.c.movie_id), 0)))
-        current_max = result.scalar_one()
-        return int(current_max) + 1
-
-
-def create_catalog_router(config: RecommenderApiConfig, engine: Engine) -> APIRouter:
-    router = APIRouter(tags=["catalog"])
-
-    @router.post("/movies", response_model=MovieResponse, status_code=201)
-    def create_movie(body: CreateMovieRequest) -> MovieResponse:
-        movie_id = body.movie_id if body.movie_id is not None else _next_movie_id(engine)
-        year = _resolve_year(body.title, body.year)
-
-        with engine.begin() as conn:
-            existing = conn.execute(
-                select(catalog_movies.c.movie_id).where(
-                    catalog_movies.c.movie_id == movie_id
-                )
-            ).first()
-            if existing is not None:
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"Movie with movie_id={movie_id} already exists",
-                )
-
-            conn.execute(
-                insert(catalog_movies).values(
-                    movie_id=movie_id,
-                    title=body.title,
-                    genres=body.genres,
-                    year=year,
-                    tags=[],
-                    active=True,
-                    pending_opensearch_sync=True,
-                    pipeline_version=config.pipeline_version,
-                )
-            )
-
-        return MovieResponse(
-            movie_id=movie_id,
-            title=body.title,
-            genres=body.genres,
-            year=year,
-            pending_opensearch_sync=True,
-        )
-
-    @router.get("/catalog/pending-sync", response_model=PendingSyncResponse)
-    def pending_sync() -> PendingSyncResponse:
-        with engine.connect() as conn:
-            result = conn.execute(
-                select(func.count())
-                .select_from(catalog_movies)
-                .where(
-                    catalog_movies.c.pending_opensearch_sync.is_(True),
-                    catalog_movies.c.active.is_(True),
-                )
-            )
-            count = int(result.scalar_one())
-        return PendingSyncResponse(pending_count=count)
-
-    return router
+"""Catalog write routes."""
+
+from __future__ import annotations
+
+from sqlalchemy.engine import Engine
+from config import RecommenderApiConfig
+from fastapi import APIRouter, HTTPException, Query
+from clients.catalog_indexer import CatalogIndexerClient
+from shared.exceptions import CatalogMovieAlreadyExists
+from schemas.catalog import CreateMovieRequest, MovieResponse, PendingSyncResponse
+from shared.db.catalog import count_pending_catalog_sync, insert_catalog_movie
+
+
+def create_catalog_router(config: RecommenderApiConfig, engine: Engine, catalog_indexer: CatalogIndexerClient) -> APIRouter:
+    """
+    Create the catalog router and provide the endpoint handlers with the configuration which includes the
+    movies alias and the pipeline version, the SQLAlchemy engine to interact with the database, and the OpenSearch
+    client to interact with the OpenSearch cluster.
+
+    ============================ Arguments ============================
+    config: The configuration for the recommender API.
+    engine: The SQLAlchemy engine.
+    os_client: The OpenSearch client.
+
+    ============================ Returns ============================
+    The catalog router.
+    """
+    # Create the router which will contain the catalog endpoints like /movies and /pending-sync.
+    router = APIRouter(tags=["catalog"])
+
+    @router.post("/movies", response_model=MovieResponse, status_code=201)
+    def create_movie(body: CreateMovieRequest, \
+                    sync: str | None = Query(default=None, description="Pass immediate=true to index the movie in OpenSearch immediately."), \
+                    ) -> MovieResponse:
+        """
+        Create a new movie in the catalog.
+
+        1. First, insert the movie into the database.
+        2. Then, if the user wants to index the movie in OpenSearch immediately, index the movie document into the movies alias.
+        3. Finally, return the movie information.
+
+        ============================ Arguments ============================
+        body: The request body containing the movie information.
+        sync: Whether to index the movie in OpenSearch immediately.
+
+        ============================ Returns ============================
+        The response body containing the movie information.
+        """
+        # Check if the user wants to index the movie in OpenSearch immediately.
+        immediate_sync = sync == "immediate=true"
+
+        # Insert the movie into the database.
+        try:
+            movie_id, year = insert_catalog_movie(
+                engine,
+                movie_id=body.movie_id,
+                title=body.title,
+                genres=body.genres,
+                year=body.year,
+                pipeline_version=config.pipeline_version,
+            )
+        except CatalogMovieAlreadyExists as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Movie with movie_id={exc.movie_id} already exists",
+            ) from exc
+
+        # If the user doesn't want to index the movie in OpenSearch immediately, return the movie information.
+        if not immediate_sync:
+            return MovieResponse(
+                movie_id=movie_id,
+                title=body.title,
+                genres=body.genres,
+                year=year,
+                pending_opensearch_sync=True,
+                opensearch_synced=False,
+            )
+
+        # If the user want's to immediately sync the movie in OpenSearch, index the movie document into the movies alias.
+        synced, _error = catalog_indexer.index_movie(movie_id)
+        # If the movie was successfully indexed, mark the movie as synced in the database.
+
+        # Return the movie information.
+        return MovieResponse(
+            movie_id=movie_id,
+            title=body.title,
+            genres=body.genres,
+            year=year,
+            pending_opensearch_sync=not synced,
+            opensearch_synced=synced,
+        )
+
+    @router.get("/catalog/pending-sync", response_model=PendingSyncResponse)
+    def pending_sync() -> PendingSyncResponse:
+        """
+        Get the number of movies that are pending sync to the OpenSearch cluster from the database.
+
+        ============================ Returns ============================
+        The response body containing the number of movies that are pending sync to the OpenSearch cluster.
+        """
+        count = count_pending_catalog_sync(engine)
+        return PendingSyncResponse(pending_count=count)
+
+    return router
+

@@ -24,6 +24,7 @@ class MovieResponse(BaseModel):
     genres: list[str]
     year: int | None
     pending_opensearch_sync: bool
+    opensearch_synced: bool = False
 
 
 class PendingSyncResponse(BaseModel):

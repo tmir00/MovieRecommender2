@@ -7,6 +7,7 @@
 # Tags only:            docker compose --profile tags up --build
 # Index movie catalog (CSV bootstrap):  docker compose --profile catalog up --build index-catalog
 # Sync API catalog to OpenSearch:      docker compose --profile catalog run --build index-sync
+# Live catalog indexer (immediate sync): included in --profile api (catalog-indexer-api)
 # Recommender API:                     docker compose --profile api up --build recommender-api
 #   (run index-catalog first so the `movies` alias exists; run migrate for catalog_movies table)
 # Migrations run automatically via the `migrate` service before consumers start.
@@ -295,6 +296,26 @@ services:
       migrate:
         condition: service_completed_successfully
 
+  catalog-indexer-api:
+    <<: *indexing-image
+    container_name: catalog-indexer-api
+    profiles:
+      - api
+    restart: unless-stopped
+    env_file:
+      - .env
+      - ./services/indexing/.env
+    command: ["python", "src/api/main.py"]
+    expose:
+      - "8101"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
   recommender-api:
     <<: *recommender-api
     container_name: recommender-api
@@ -311,6 +332,8 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      catalog-indexer-api:
+        condition: service_started
 
 networks:
   movierec:

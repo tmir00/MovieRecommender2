@@ -5,8 +5,8 @@ from __future__ import annotations
 import uvicorn
 
 from fastapi import FastAPI
-from sqlalchemy import text
 from db.session import get_engine
+from shared.db.health import ping_postgres
 from config import RecommenderApiConfig
 from contextlib import asynccontextmanager
 from fastapi.responses import JSONResponse
@@ -14,12 +14,14 @@ from queries.search import opensearch_ready
 from routes.search import create_search_router
 from routes.catalog import create_catalog_router
 from opensearch_client import get_opensearch_client
+from clients.catalog_indexer import CatalogIndexerClient
 
 
 # Load the configuration and create the database and OpenSearch clients.
 config = RecommenderApiConfig.from_env()
 engine = get_engine()
 os_client = get_opensearch_client(config)
+catalog_indexer = CatalogIndexerClient(config.catalog_indexer_url)
 
 # Check if the database is reachable.
 def _postgres_ok() -> bool:
@@ -29,12 +31,7 @@ def _postgres_ok() -> bool:
     ============================ Returns ============================
     True if the database is reachable, False otherwise.
     """
-    try:
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        return True
-    except Exception:
-        return False
+    return ping_postgres(engine)
 
 
 @asynccontextmanager
@@ -59,7 +56,7 @@ app = FastAPI(
 
 # Include the search and catalog routers.
 app.include_router(create_search_router(config, os_client))
-app.include_router(create_catalog_router(config, engine))
+app.include_router(create_catalog_router(config, engine, catalog_indexer))
 
 # Health check endpoints.
 @app.get("/health")
@@ -88,7 +85,7 @@ def main() -> None:
     """
     Run the recommender API using uvicorn.
     
-    \============================ Arguments ============================
+    ============================ Arguments ============================
     host: The host to run the API on.
     port: The port to run the API on.
     reload: Whether to reload the API when code changes are detected.

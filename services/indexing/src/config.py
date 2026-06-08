@@ -33,6 +33,8 @@ class IndexingConfig:
     max_movies: int
     database_url: str
     sync_batch_size: int
+    catalog_indexer_host: str
+    catalog_indexer_port: int
 
     @property
     def physical_index(self) -> str:
@@ -60,6 +62,8 @@ class IndexingConfig:
                 "postgresql+psycopg://movierec:movierec@postgres:5432/movierec",
             ),
             sync_batch_size=int(os.environ.get("SYNC_BATCH_SIZE", "500")),
+            catalog_indexer_host=os.environ.get("CATALOG_INDEXER_HOST", "0.0.0.0"),
+            catalog_indexer_port=int(os.environ.get("CATALOG_INDEXER_PORT", "8101")),
         )
 
     def startup_log_extra(self) -> dict[str, Any]:

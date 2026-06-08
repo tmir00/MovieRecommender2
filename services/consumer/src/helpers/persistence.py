@@ -1,19 +1,23 @@
 """Insert validated events into Postgres (SQLAlchemy Core)."""
 
 from sqlalchemy import Connection
-from sqlalchemy.dialects.postgresql import insert
 
-from db.models import ratings_events, tag_events
 from schemas.events import RatingEvent, TagEvent
+from shared.db.events import (
+    insert_rating_event as _insert_rating_event,
+    insert_tag_event as _insert_tag_event,
+    rating_event_id as _shared_rating_event_id,
+    tag_event_id as _shared_tag_event_id,
+)
 
 
 def _rating_event_id(event: RatingEvent) -> str:
     """Stable id so re-consuming the same Kafka message does not duplicate rows."""
-    return f"rating.created:{event.user_id}:{event.movie_id}:{event.timestamp}"
+    return _shared_rating_event_id(event.user_id, event.movie_id, event.timestamp)
 
 
 def _tag_event_id(event: TagEvent) -> str:
-    return f"tag.created:{event.user_id}:{event.movie_id}:{event.timestamp}:{event.tag}"
+    return _shared_tag_event_id(event.user_id, event.movie_id, event.timestamp, event.tag)
 
 
 def persist_rating_event(
@@ -30,19 +34,15 @@ def persist_rating_event(
     event: Validated rating payload from Kafka.
     pipeline_version: Pipeline label stored on each row (e.g. v1).
     """
-    stmt = (
-        insert(ratings_events)
-        .values(
-            event_id=_rating_event_id(event),
-            user_id=event.user_id,
-            movie_id=event.movie_id,
-            rating=event.rating,
-            rating_timestamp=event.timestamp,
-            pipeline_version=pipeline_version,
-        )
-        .on_conflict_do_nothing(index_elements=["event_id"])
+    _insert_rating_event(
+        connection,
+        event_id=_rating_event_id(event),
+        user_id=event.user_id,
+        movie_id=event.movie_id,
+        rating=event.rating,
+        rating_timestamp=event.timestamp,
+        pipeline_version=pipeline_version,
     )
-    connection.execute(stmt)
 
 
 def persist_tag_event(
@@ -59,19 +59,15 @@ def persist_tag_event(
     event: Validated tag payload from Kafka.
     pipeline_version: Pipeline label stored on each row (e.g. v1).
     """
-    stmt = (
-        insert(tag_events)
-        .values(
-            event_id=_tag_event_id(event),
-            user_id=event.user_id,
-            movie_id=event.movie_id,
-            tag=event.tag,
-            tag_timestamp=event.timestamp,
-            pipeline_version=pipeline_version,
-        )
-        .on_conflict_do_nothing(index_elements=["event_id"])
+    _insert_tag_event(
+        connection,
+        event_id=_tag_event_id(event),
+        user_id=event.user_id,
+        movie_id=event.movie_id,
+        tag=event.tag,
+        tag_timestamp=event.timestamp,
+        pipeline_version=pipeline_version,
     )
-    connection.execute(stmt)
 
 
 EVENT_PERSISTERS = {

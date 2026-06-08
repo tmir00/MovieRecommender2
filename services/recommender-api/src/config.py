@@ -19,6 +19,7 @@ class RecommenderApiConfig:
     api_host: str
     api_port: int
     pipeline_version: str
+    catalog_indexer_url: str
 
     @classmethod
     def from_env(cls) -> RecommenderApiConfig:
@@ -30,4 +31,7 @@ class RecommenderApiConfig:
             api_host=os.environ.get("RECOMMENDER_API_HOST", "0.0.0.0"),
             api_port=int(os.environ.get("RECOMMENDER_API_PORT", "8000")),
             pipeline_version=os.environ.get("PIPELINE_VERSION", "v1"),
+            catalog_indexer_url=os.environ.get(
+                "CATALOG_INDEXER_URL", "http://catalog-indexer-api:8101"
+            ),
         )

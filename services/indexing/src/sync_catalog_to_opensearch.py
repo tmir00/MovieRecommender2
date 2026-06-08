@@ -11,32 +11,11 @@ from opensearchpy import OpenSearch
 from opensearchpy.helpers import bulk
 from opensearch_client import get_opensearch_client
 from shared.logging_config import configure_logging
-from sqlalchemy import bindparam, create_engine, text
+from shared.db.engine import create_engine_from_url
 from shared.movie_document import build_movie_document
-
-
-# SQL query to find all the movies that are pending sync to the OpenSearch cluster.
-_PENDING_SELECT = text(
-    """
-    SELECT movie_id, title, genres, year, tags, pipeline_version
-    FROM catalog_movies
-    WHERE pending_opensearch_sync = true AND active = true
-    ORDER BY movie_id
-    LIMIT :batch_size
-    """
-)
-
-# SQL query to mark the movies as synced to the OpenSearch cluster.
-_MARK_SYNCED = (
-    text(
-        """
-    UPDATE catalog_movies
-    SET pending_opensearch_sync = false,
-        synced_to_opensearch_at = NOW(),
-        updated_at = NOW()
-    WHERE movie_id IN :movie_ids
-    """
-    ).bindparams(bindparam("movie_ids", expanding=True))
+from shared.db.catalog import (
+    fetch_pending_catalog_movies,
+    mark_catalog_movies_synced,
 )
 
 
@@ -59,7 +38,7 @@ def sync_catalog(config: IndexingConfig, logger: logging.Logger) -> int:
     - Fetching the pending catalog rows from the database in batches.
     - Building the movie documents from the rows.
     - Sending the movie documents to the OpenSearch cluster in batches.
-    
+
     ============================ Arguments ============================
     config: The configuration for the indexing run.
     logger: The logger to use.
@@ -72,20 +51,19 @@ def sync_catalog(config: IndexingConfig, logger: logging.Logger) -> int:
     _ensure_alias_ready(client, config)
 
     # Create the database engine to access the Postgres database.
-    engine = create_engine(config.database_url, pool_pre_ping=True)
-    
+    engine = create_engine_from_url(config.database_url)
+
     # Initialize counters for the number of movies synced and the number of failures.
     total_synced = 0
     total_failures = 0
     # Loop until we have synced all the pending catalog rows.
     try:
         while True:
-            with engine.connect() as conn:
-                # Fetch the pending catalog rows from the database in batches.
-                rows = conn.execute(
-                    _PENDING_SELECT,
-                    {"batch_size": config.sync_batch_size},
-                ).mappings().all()
+            # Fetch the pending catalog rows from the database in batches.
+            rows = fetch_pending_catalog_movies(
+                engine,
+                batch_size=config.sync_batch_size,
+            )
 
             # If there are no pending catalog rows, break the loop.
             if not rows:
@@ -98,13 +76,13 @@ def sync_catalog(config: IndexingConfig, logger: logging.Logger) -> int:
             # Iterate over each row in the batch.
             for row in rows:
                 # Build the movie document from the row and add it to the actions list.
-                movie_id = int(row["movie_id"])
+                movie_id = row["movie_id"]
                 doc = build_movie_document(
                     movie_id=movie_id,
                     title=row["title"],
-                    genres=list(row["genres"] or []),
+                    genres=row["genres"],
                     year=row["year"],
-                    tags=list(row["tags"] or []),
+                    tags=row["tags"],
                     pipeline_version=row["pipeline_version"],
                 )
 
@@ -115,7 +93,7 @@ def sync_catalog(config: IndexingConfig, logger: logging.Logger) -> int:
                         "_source": doc,
                     }
                 )
-                
+
                 movie_ids.append(movie_id)
 
             # Send the actions to the OpenSearch cluster in batches.
@@ -139,8 +117,7 @@ def sync_catalog(config: IndexingConfig, logger: logging.Logger) -> int:
                 break
 
             # Mark the movie IDs as synced in the database.
-            with engine.begin() as conn:
-                conn.execute(_MARK_SYNCED, {"movie_ids": movie_ids})
+            mark_catalog_movies_synced(engine, movie_ids)
 
             # Increment the total number of movies synced.
             total_synced += len(movie_ids)
@@ -156,7 +133,7 @@ def sync_catalog(config: IndexingConfig, logger: logging.Logger) -> int:
     finally:
         # Dispose of the database engine.
         engine.dispose()
-    
+
     # If there were any failures, raise an error.
     if total_failures:
         raise RuntimeError(f"Catalog sync failed with {total_failures} bulk errors")
@@ -176,7 +153,7 @@ def main() -> None:
     ============================ Returns ============================
     None
     """
-    # Configure logging and load the configuration. 
+    # Configure logging and load the configuration.
     logger = configure_logging(os.environ.get("LOGGER_NAME", "movie-indexer"))
     config = IndexingConfig.from_env()
 

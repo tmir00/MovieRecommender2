@@ -1,0 +1,37 @@
+---
+description: Intuitive docstrings and comments for new Python functions
+globs: services/**/*.py
+alwaysApply: false
+---
+
+# Python documentation style
+
+When creating or editing functions in this repo, read and follow the **intuitive-documentation** skill (`~/.cursor/skills/intuitive-documentation/SKILL.md`). Match existing code in `services/` — explanations should teach **what happens, in what order, and why**.
+
+## Docstrings
+
+- Summary line in plain English (imperative: what the function accomplishes).
+- Multi-step logic: numbered steps (`1. First…`) or `Do this by:` bullets.
+- Non-obvious behavior: short explanatory paragraphs (aliases vs physical indexes, health checks).
+- Args/Returns via banner sections — not Google/NumPy `:param` style:
+
+```
+============================ Arguments ============================
+client: The OpenSearch client.
+
+============================ Returns ============================
+True if the database is reachable, False otherwise.
+```
+
+- Health checks: prefix with `! Health check function.` then explain readiness criteria.
+- Trivial private helpers: one line or no docstring. Pydantic models: one sentence.
+
+## Inline comments
+
+- Full sentences at each logical phase; mirror the docstring flow inside the body.
+- Branch comments: `# If the movies alias doesn't exist, return a failure and an error message.`
+- Teach intuition when helpful: `# Conceptually, these narrow the matching movies…`
+
+## Avoid
+
+- Types in docstrings (they live in signatures), jargon without context, comments on obvious lines.

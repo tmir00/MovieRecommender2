@@ -6,10 +6,10 @@ import os
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from health.state import HealthState
+from shared.db.health import ping_postgres
 
 
 def _max_poll_age_seconds() -> float:
@@ -19,12 +19,7 @@ def _max_poll_age_seconds() -> float:
 
 def _postgres_ok(engine: Engine) -> bool:
     """Return True when Postgres accepts a simple query."""
-    try:
-        with engine.connect() as connection:
-            connection.execute(text("SELECT 1"))
-        return True
-    except Exception:
-        return False
+    return ping_postgres(engine)
 
 
 def _live_check(state: HealthState) -> JSONResponse | None:

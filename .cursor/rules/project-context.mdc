@@ -25,7 +25,8 @@ ratings/tags → Kafka producer → Kafka → consumer → Postgres (events)
 movies.csv → index-catalog (Job) → OpenSearch movies_vN → alias `movies`
 
 recommender-api POST /movies → Postgres catalog_movies (pending_sync=true)
-index-sync (Job) → bulk upsert to OpenSearch alias
+catalog-indexer-api POST /index/movie/{id} → OpenSearch (immediate sync via ?sync=immediate=true)
+index-sync (Job) → bulk upsert pending rows to OpenSearch alias
 
 recommender-api GET /search → OpenSearch alias
 ```
@@ -46,12 +47,12 @@ recommender-api GET /search → OpenSearch alias
 |---------|----------|
 | `stream` / `ratings` / `tags` | Kafka pipeline |
 | `catalog` | `index-catalog`, `index-sync`, `create-movie-index`, `index-movies` |
-| `api` | `recommender-api` (+ `migrate`) |
+| `api` | `recommender-api`, `catalog-indexer-api` (+ `migrate`) |
 
 **Runbook:**
 1. `docker compose --profile catalog up --build index-catalog` (OpenSearch bootstrap)
 2. `docker compose --profile api up --build recommender-api`
-3. `POST /movies` → `docker compose --profile catalog run index-sync`
+3. `POST /movies` → `docker compose --profile catalog run index-sync` (or `?sync=immediate=true` via catalog-indexer-api)
 
 ## Deferred
 

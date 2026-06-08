@@ -2,7 +2,7 @@
 
 import os
 
-from sqlalchemy import create_engine
+from shared.db.engine import create_engine_from_url
 
 
 def get_engine():
@@ -13,4 +13,4 @@ def get_engine():
     A configured SQLAlchemy engine with a connection pool.
     """
     database_url = os.environ["DATABASE_URL"]
-    return create_engine(database_url, pool_pre_ping=True)
+    return create_engine_from_url(database_url)

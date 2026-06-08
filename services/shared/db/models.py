@@ -1,4 +1,4 @@
-"""SQLAlchemy Core table definitions (must stay in sync with Alembic migrations)."""
+"""SQLAlchemy Core table definitions (must stay in sync with Alembic migrations in consumer/alembic)."""
 
 from sqlalchemy import (
     BigInteger,
@@ -12,7 +12,6 @@ from sqlalchemy import (
     Text,
     false,
     func,
-    true,
 )
 from sqlalchemy.dialects.postgresql import ARRAY
 
@@ -86,20 +85,10 @@ catalog_movies = Table(
     Column("genres", ARRAY(Text), nullable=False),
     Column("year", Integer, nullable=True),
     Column("tags", ARRAY(Text), nullable=False),
-    Column("active", Boolean, server_default=true(), nullable=False),
-    Column("pending_opensearch_sync", Boolean, server_default=true(), nullable=False),
+    Column("active", Boolean, nullable=False),
+    Column("pending_opensearch_sync", Boolean, nullable=False),
     Column("synced_to_opensearch_at", DateTime(timezone=True), nullable=True),
-    Column(
-        "created_at",
-        DateTime(timezone=True),
-        server_default=func.now(),
-        nullable=False,
-    ),
-    Column(
-        "updated_at",
-        DateTime(timezone=True),
-        server_default=func.now(),
-        nullable=False,
-    ),
-    Column("pipeline_version", Text, server_default="v1", nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    Column("pipeline_version", Text, nullable=False),
 )

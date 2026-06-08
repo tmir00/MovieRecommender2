@@ -5,8 +5,9 @@ This is used by the recommender API to read from the database when we need to qu
 
 import os
 
-from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
+
+from shared.db.engine import create_engine_from_url
 
 
 def get_engine() -> Engine:
@@ -17,4 +18,4 @@ def get_engine() -> Engine:
     A configured SQLAlchemy engine with a connection pool.
     """
     database_url = os.environ["DATABASE_URL"]
-    return create_engine(database_url, pool_pre_ping=True)
+    return create_engine_from_url(database_url)

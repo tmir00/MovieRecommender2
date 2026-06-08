@@ -6,9 +6,8 @@ from typing import Any
 
 from confluent_kafka import Message
 from sqlalchemy import Connection
-from sqlalchemy.dialects.postgresql import insert
 
-from db.models import dead_letter_events
+from shared.db.events import insert_dead_letter_event
 
 
 def message_payload_text(msg: Message) -> str:
@@ -54,7 +53,8 @@ def persist_dead_letter_event(
     if payload is None:
         payload = message_payload_text(msg)
 
-    stmt = insert(dead_letter_events).values(
+    insert_dead_letter_event(
+        connection,
         source_topic=msg.topic(),
         source_partition=msg.partition(),
         source_offset=msg.offset(),
@@ -63,4 +63,3 @@ def persist_dead_letter_event(
         error_message=error_message,
         payload=payload,
     )
-    connection.execute(stmt)
