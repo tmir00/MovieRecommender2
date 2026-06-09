@@ -18,11 +18,16 @@ from queries.search import (
 
 
 class MovieHit(BaseModel):
-    """This the response body for the movie hit from the OpenSearch search results."""
+    """Movie hit returned by lexical and vector search endpoints."""
     movie_id: int
     title: str
     year: int | None = None
     genres: list[str] = []
+    overview: str | None = None
+    tagline: str | None = None
+    vote_average: float | None = None
+    vote_count: int | None = None
+    popularity: float | None = None
     score: float | None = None
 
 
@@ -95,6 +100,12 @@ def create_search_router(config: RecommenderApiConfig, client: OpenSearch, embed
     def search_similar(
         q: str | None = Query(None, description="Free-text query for similar movies"),
         movie_id: int | None = Query(None, ge=1, description="Find movies similar to this id"),
+        genre: str | None = Query(None, description="Exact genre filter"),
+        min_vote_count: int | None = Query(
+            None,
+            ge=0,
+            description="Minimum TMDB vote count; 0 disables the gate",
+        ),
         size: int = Query(10, ge=1, le=100),
     ) -> dict[str, Any]:
         """
@@ -111,6 +122,8 @@ def create_search_router(config: RecommenderApiConfig, client: OpenSearch, embed
         ============================ Arguments ============================
         q: Free-text query to embed and search.
         movie_id: Source movie id whose neighbors to return.
+        genre: Optional exact genre filter.
+        min_vote_count: Optional vote floor override; 0 disables the gate.
         size: Maximum number of results.
 
         ============================ Returns ============================
@@ -139,6 +152,8 @@ def create_search_router(config: RecommenderApiConfig, client: OpenSearch, embed
                     embedder,
                     movie_id=movie_id,
                     size=size,
+                    genre=genre,
+                    min_vote_count=min_vote_count,
                 )
             except LookupError as exc:
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -157,6 +172,8 @@ def create_search_router(config: RecommenderApiConfig, client: OpenSearch, embed
             embedder,
             q=q or "",
             size=size,
+            genre=genre,
+            min_vote_count=min_vote_count,
         )
 
         return {

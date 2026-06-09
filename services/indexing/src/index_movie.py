@@ -9,20 +9,20 @@ from opensearchpy import OpenSearch
 from embedder_client import EmbedderClient
 from build_index_document import build_index_document
 from opensearchpy.exceptions import OpenSearchException
-
+from shared.features.models import CatalogMovieInput, TmdbMetadata
 
 logger = logging.getLogger(__name__)
 
 
-def index_movie_document(client: OpenSearch, config: IndexingConfig, embedder: EmbedderClient, *, \
-                        movie_id: int, title: str, genres: list[str], year: int | None = None, \
-                        tags: list[str] | None = None, pipeline_version: str | None = None) -> tuple[bool, str | None]:
+def index_movie_document(client: OpenSearch, config: IndexingConfig, embedder: EmbedderClient, \
+                            catalog_input: CatalogMovieInput, *, tmdb: TmdbMetadata | None = None, \
+                            pipeline_version: str | None = None) -> tuple[bool, str | None]:
     """
     Upsert one movie document into the movies alias.
 
     Do this by:
     1. Checking if the movies alias exists.
-    2. Building the movie document with an embedding vector.
+    2. Building the movie document with an embedding vector and search text.
     3. Indexing the movie document into the movies alias.
     4. Returning the success and error message.
 
@@ -30,11 +30,8 @@ def index_movie_document(client: OpenSearch, config: IndexingConfig, embedder: E
     client: The OpenSearch client.
     config: The configuration for the indexing run.
     embedder: Client for the embedder HTTP API.
-    movie_id: The ID of the movie to index.
-    title: The title of the movie to index.
-    genres: The genres of the movie to index.
-    year: The year of the movie to index.
-    tags: The tags of the movie to index.
+    catalog_input: Normalized catalog fields for one movie.
+    tmdb: Optional TMDB metadata from the Postgres catalog row or a live fetch.
     pipeline_version: The pipeline version of the movie to index.
 
     ============================ Returns ============================
@@ -53,31 +50,26 @@ def index_movie_document(client: OpenSearch, config: IndexingConfig, embedder: E
         doc = build_index_document(
             embedder,
             config,
-            movie_id=movie_id,
-            title=title,
-            genres=genres,
-            year=year,
-            tags=tags or [],
+            catalog_input,
+            tmdb=tmdb,
+            pipeline_version=pipeline_version,
         )
-        if pipeline_version:
-            doc["pipeline_version"] = pipeline_version
 
         # Index the movie document into the movies alias.
         client.index(
             index=config.movies_alias,
-            id=str(movie_id),
+            id=str(catalog_input.movie_id),
             body=doc,
             refresh=True,
         )
-        # Return a success and no error message.
         return True, None
 
-    # If there was an OpenSearch exception, return a failure and the error message.
+    # If an OpenSearch exception occurs, log the error and return a failure and an error message.
     except OpenSearchException as exc:
-        logger.exception("Failed to index movie %s in OpenSearch", movie_id)
+        logger.exception("Failed to index movie %s in OpenSearch", catalog_input.movie_id)
         return False, str(exc)
 
-    # If there was an exception, return a failure and the error message.
+    # If an exception occurs, log the error and return a failure and an error message.
     except Exception as exc:
-        logger.exception("Failed to index movie %s in OpenSearch", movie_id)
+        logger.exception("Failed to index movie %s in OpenSearch", catalog_input.movie_id)
         return False, str(exc)

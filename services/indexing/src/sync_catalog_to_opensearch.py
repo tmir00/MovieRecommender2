@@ -8,10 +8,12 @@ import logging
 
 from config import IndexingConfig
 from opensearchpy import OpenSearch
-from opensearchpy.helpers import bulk
-from build_index_document import CatalogRowFields, build_index_documents_batch
+from bulk_helpers import flush_bulk_batch, successful_movie_ids
+from build_index_document import build_index_documents_batch
 from embedder_client import EmbedderClient
 from opensearch_client import get_opensearch_client
+from shared.features.adapters.postgres import row_to_catalog_input
+from shared.tmdb.models import tmdb_metadata_from_catalog_row
 from shared.logging_config import configure_logging
 from shared.db.engine import create_engine_from_url
 from shared.db.catalog import (
@@ -72,17 +74,11 @@ def sync_catalog(config: IndexingConfig, logger: logging.Logger, embedder: Embed
                 break
 
             # Build index documents with embeddings for the whole batch.
-            catalog_rows = [
-                CatalogRowFields(
-                    movie_id=row["movie_id"],
-                    title=row["title"],
-                    genres=list(row["genres"] or []),
-                    year=row["year"],
-                    tags=list(row["tags"] or []),
-                )
+            batch_rows = [
+                (row_to_catalog_input(row), tmdb_metadata_from_catalog_row(row))
                 for row in rows
             ]
-            docs = build_index_documents_batch(embedder, config, catalog_rows)
+            docs = build_index_documents_batch(embedder, config, batch_rows)
             movie_ids = [row["movie_id"] for row in rows]
 
             actions = []
@@ -97,30 +93,21 @@ def sync_catalog(config: IndexingConfig, logger: logging.Logger, embedder: Embed
                 )
 
             # Send the actions to the OpenSearch cluster in batches.
-            # Use the Bulk API to send the actions to the OpenSearch cluster.
-            success, errors = bulk(
+            failure_count, failed_ids = flush_bulk_batch(
                 client,
                 actions,
-                raise_on_error=False,
-                raise_on_exception=False,
+                logger,
+                log_context="Catalog sync",
             )
+            total_failures += failure_count
 
-            # Count the number of failures.
-            failure_count = len(errors) if errors else 0
-            # If there were any failures, log an error.
-            if failure_count:
-                logger.error(
-                    "Catalog sync batch had failures",
-                    extra={"success": success, "failure_count": failure_count},
-                )
-                total_failures += failure_count
-                break
+            # Get the successful movie IDs.
+            success_ids = successful_movie_ids(movie_ids, failed_ids)
+            # If there are any successful movie IDs, mark the catalog movies as synced.
+            if success_ids:
+                mark_catalog_movies_synced(engine, success_ids)
 
-            # Mark the movie IDs as synced in the database.
-            mark_catalog_movies_synced(engine, movie_ids)
-
-            # Increment the total number of movies synced.
-            total_synced += len(movie_ids)
+            total_synced += len(success_ids)
             # Log the progress.
             logger.info(
                 "Synced catalog batch to OpenSearch",

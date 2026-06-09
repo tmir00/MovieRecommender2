@@ -1,5 +1,5 @@
 """
-OpenSearch index mapping for the movie catalog (v2 with kNN vector search).
+OpenSearch index mapping for the movie catalog (v4 with field-based lexical + kNN).
 """
 
 MOVIES_INDEX_MAPPING = {
@@ -19,8 +19,16 @@ MOVIES_INDEX_MAPPING = {
             "year": {"type": "integer"},
             "genres": {"type": "keyword"},
             "tags": {"type": "keyword"},
-            "search_text": {"type": "text"},
+            "overview": {"type": "text"},
+            "tagline": {"type": "text"},
             "pipeline_version": {"type": "keyword"},
+            "popularity": {"type": "float"},
+            "vote_average": {"type": "float"},
+            "vote_count": {"type": "integer"},
+            "runtime": {"type": "integer"},
+            "original_language": {"type": "keyword"},
+            "tmdb_keywords": {"type": "keyword"},
+            "tmdb_id": {"type": "integer"},
             "embedding": {
                 "type": "knn_vector",
                 "dimension": 384,

@@ -7,7 +7,7 @@ alwaysApply: true
 
 ## Goal
 
-Stream MovieLens 25M dataset events through Kafka, persist interaction data in Postgres, and index movie catalog features in OpenSearch for search/recommendation.
+Stream MovieLens 25M dataset events through Kafka, persist interaction data in Postgres, index movie catalog features in OpenSearch for search, and serve personalized recommendations via retrieve-then-rank (content kNN + NeuMF on ratings).
 
 ## Dataset (`datasets/ml-25m/`, mounted at `/data` in Compose)
 
@@ -15,34 +15,38 @@ Stream MovieLens 25M dataset events through Kafka, persist interaction data in P
 |------|--------|--------|
 | `ratings.csv` | userId, movieId, rating, timestamp | **In pipeline** (producer → Kafka → consumer → Postgres) |
 | `tags.csv` | userId, movieId, tag, timestamp | **In pipeline** |
-| `movies.csv` | movieId, title, genres (~62k rows) | **Bootstrap** via `index-catalog` → OpenSearch |
+| `movies.csv` | movieId, title, genres (~62k rows) | **Bootstrap** via `seed-catalog` → `catalog_movies` |
+| `links.csv` | movieId, imdbId, tmdbId | **Bootstrap** via `seed-catalog` (tmdb_id on catalog rows) |
 
 ## Architecture
 
 ```text
 ratings/tags → Kafka producer → Kafka → consumer → Postgres (events)
 
-movies.csv → index-catalog (Job) → OpenSearch movies_v2 (kNN) → alias `movies`
-              ↑ embedder :8100 (all-MiniLM-L6-v2, 384d)
+movies.csv + links.csv → seed-catalog → catalog_movies (Postgres, source of truth)
+enrich-tmdb → TMDB API → catalog_movies TMDB columns
+index-catalog → catalog_movies → embedder :8100 → OpenSearch movies_v4 → alias `movies`
 
-recommender-api POST /movies → Postgres catalog_movies (pending_sync=true)
-catalog-indexer-api POST /index/movie/{id} → embedder → OpenSearch (immediate sync)
-index-sync (Job) → embedder → bulk upsert pending rows to OpenSearch alias
+recommender-api POST /movies → catalog_movies (pending_sync=true)
+catalog-indexer-api POST /index/movie/{id} → catalog_movies + embedder → OpenSearch
+index-sync (Job) → pending catalog_movies → embedder → OpenSearch alias
 
-recommender-api GET /search → OpenSearch alias (lexical)
-recommender-api GET /search/similar → embedder + OpenSearch kNN
+recommender-api GET /search → lexical multi_match (title^3, clean_title^2, tagline^1.5, overview^1, tmdb_keywords^1); no vote/popularity boost
+recommender-api GET /search/similar → embedder + kNN with function_score (popularity, vote_average); optional genre + min_vote_count
+recommender-api search hits → movie_id, title, year, genres, overview, tagline, vote_average, vote_count, popularity, score
+recommender-api POST /recommend → kNN candidates + NeuMF ranker (planned)
 ```
 
-**Interview line:** CSV bootstraps the search index once; API-added catalog lives in Postgres as source of truth and syncs incrementally to OpenSearch with embeddings. User events still stream via Kafka.
+**Interview line:** Postgres `catalog_movies` is the catalog source of truth (ML-25m seed + API writes); OpenSearch is a search projection built from Postgres with embeddings. User events still stream via Kafka.
 
 ## Current stack
 
 - **Kafka**, **Postgres 17**, **OpenSearch 2.19**
 - **Producer / consumer** — ratings & tags; DLQ; health on `:8080`
 - **Embedder** — `sentence-transformers/all-MiniLM-L6-v2`; `POST /embed`, `/health` on `:8100`
-- **Indexing** — `index-catalog` (CSV batch), `index-sync` (Postgres → OpenSearch); all writes enrich docs via `build_index_document`
-- **Postgres** — `ratings_events`, `tag_events`, `dead_letter_events`, **`catalog_movies`**
-- **recommender-api** — `GET /search`, `GET /search/similar`, `POST /movies`, `GET /catalog/pending-sync`, `/health` on `:8000`
+- **Indexing** — `seed-catalog`, `enrich-tmdb`, `index-catalog` (Postgres → OpenSearch), `index-sync`; all writes via `build_index_document`
+- **Postgres** — `ratings_events`, `tag_events`, `dead_letter_events`, **`catalog_movies`** (base + TMDB enrichment columns)
+- **recommender-api** — `GET /search`, `GET /search/similar`, `POST /movies`, `GET /catalog/pending-sync`, `POST /recommend` (planned), `/health` on `:8000`
 - **catalog-indexer-api** — `POST /index/movie/{id}` on `:8101`
 
 ### Compose profiles
@@ -50,20 +54,92 @@ recommender-api GET /search/similar → embedder + OpenSearch kNN
 | Profile | Services |
 |---------|----------|
 | `stream` / `ratings` / `tags` | Kafka pipeline |
-| `catalog` | `embedder`, `index-catalog`, `index-sync`, `create-movie-index`, `index-movies` |
+| `catalog` | `seed-catalog`, `enrich-tmdb`, `embedder`, `index-catalog`, `index-sync`, `create-movie-index`, `index-movies` |
 | `api` | `embedder`, `recommender-api`, `catalog-indexer-api` (+ `migrate`) |
 
 **Runbook:**
-1. Set `INDEX_VERSION=v2` and `RECREATE_INDEX=true` in `services/indexing/.env` when rebuilding locally
-2. `docker compose --profile catalog up --build embedder index-catalog` (embedder + full CSV reindex with vectors)
-3. `docker compose --profile api up --build recommender-api` (starts embedder, catalog-indexer-api, API)
-4. Test: `curl embedder:8100/health/ready`, `GET /search/similar?q=inception`, `POST /movies?sync=immediate=true` → `GET /search/similar?movie_id=...`
-5. Async catalog: `POST /movies` → `docker compose --profile catalog run index-sync`
+1. `docker compose up migrate` (includes catalog_movies TMDB columns)
+2. Set `TMDB_API_KEY` in `services/indexing/.env`; set `INDEX_VERSION=v4` and `RECREATE_INDEX=true` when rebuilding locally
+3. `docker compose --profile catalog up --build seed-catalog` (movies.csv + links.csv → catalog_movies)
+4. `docker compose --profile catalog up --build enrich-tmdb` (TMDB → catalog_movies)
+5. `docker compose --profile catalog up --build embedder index-catalog` (catalog_movies → OpenSearch v4)
+6. `docker compose --profile api up --build recommender-api` (embedder, catalog-indexer-api, API)
+7. Test: `GET /search?q=toy+story`, `GET /search/similar?movie_id=1&genre=Animation`, `POST /movies?sync=immediate=true`
+8. Async catalog: `POST /movies` → `docker compose --profile catalog run index-sync`
+
+## Recommendation model (target)
+
+Personalized recommendations for a user who picks ~5 liked movies (with ratings). **Retrieve wide, rank narrow** — not lexical∩vector intersect.
+
+### Flow
+
+```text
+POST /recommend  { seeds: [{movie_id, rating}, ...] }
+        │
+        ├─► RETRIEVAL (~100–200 candidates)
+        │     • Content: avg seed OpenSearch embeddings → kNN (plot/theme similarity)
+        │     • Later: CF candidates from Postgres co-rating patterns
+        │     • Union + dedupe; exclude seeds and already-rated
+        │
+        ├─► RANK (score each candidate)
+        │     • NeuMF: MF dot-product + MLP, trained on ratings_events
+        │
+        └─► Top 10 by predicted rating
+```
+
+Lexical search is for `GET /search` (typed query), not required when the user only picks seed movies.
+
+### Two embedding systems (different jobs)
+
+| System | Source | Trained on | Used for |
+|--------|--------|------------|----------|
+| **Content** | embedder on `embedding_text` (clean_title, genres, tags, tagline, overview, keywords; no year) | Pre-trained MiniLM | OpenSearch kNN — similar plot/theme |
+| **CF** | NeuMF `user_embedding` + `movie_embedding` (64d) | `ratings_events` (ML-25m) | Predict rating — “would *you* like it?” |
+
+Content **retrieves** candidates; CF **ranks** them. TMDB scalars (`vote_average`, `popularity`, `runtime`, `original_language`) are indexed for filters/boosts, not stuffed into content or CF embeddings.
+
+### Ranker: NeuMF (single model, MF + NN)
+
+One network trained end-to-end on `(user_id, movie_id, rating)`:
+
+```text
+user_id  → Embedding → user_vec [64]
+movie_id → Embedding → movie_vec [64]
+predicted = dot(user_vec, movie_vec) + MLP(concat(user_vec, movie_vec))
+```
+
+- **Training (offline):** backprop on all ratings; vectors learn taste from co-rating patterns (no overview/genres in basic v1).
+- **Inference:** known user → `user_embedding[user_id]`; cold start (5 picks) → `user_vec = weighted_avg(movie_embedding[seed] × rating)`; score each candidate; sort.
+- CF does not “know” genre/plot — it learns “users with your rating pattern liked movie X.” Content kNN covers new/rare movies with little rating history.
+
+### Phased build
+
+| Phase | Deliverable | Neural? |
+|-------|-------------|---------|
+| **1** | `POST /recommend` — kNN retrieval + heuristic ranker (similarity + votes + genres) | Content embedder only |
+| **2** | Index TMDB scalars; TMDB lookup on all ingest paths (incl. `index-sync`) | Same |
+| **3** | Train NeuMF on `ratings_events`; serve as ranker (batch job + model artifacts) | CF NeuMF |
+| **4** | CF retriever from Postgres; optional hybrid features in ranker | Same + richer |
+
+### OpenSearch vs app code
+
+| Job | OpenSearch | recommender-api / Postgres |
+|-----|------------|----------------------------|
+| kNN retrieval | ✅ | Build avg seed vector, call OS |
+| Lexical search | ✅ | `GET /search` only |
+| Filters / vote boost | ✅ `function_score` | Build query |
+| Co-rating CF retrieval | ❌ | Postgres on `ratings_events` |
+| NeuMF scoring | ❌ | Load saved embeddings + MLP |
+| Train NeuMF | ❌ | Offline training job |
+
+**Interview line:** Retrieve with content similarity in OpenSearch, rank with a neural collaborative filter (MF + MLP) trained on streaming ratings — semantic candidates plus “users who rated like you” patterns baked into CF embeddings.
 
 ## Deferred
 
-- `GET /recommend`, `POST /rate`
-- Postgres seed of ML-25m into `catalog_movies` (CSV only seeds OpenSearch today)
+- `POST /recommend` implementation (see **Recommendation model (target)** above)
+- `POST /rate` (live rating → Kafka → refresh CF training data)
+- NeuMF training job + model serving artifact
+- MovieLens tag aggregation from `tag_events` into `embedding_text` (deferred)
 
 ## Repo layout
 

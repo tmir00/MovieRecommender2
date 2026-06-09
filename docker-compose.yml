@@ -5,7 +5,10 @@
 # Run stack + consumer:  docker compose --profile stream up --build
 # Ratings only:         docker compose --profile ratings up --build
 # Tags only:            docker compose --profile tags up --build
-# Index movie catalog (CSV bootstrap):  docker compose --profile catalog up --build index-catalog
+# Catalog pipeline: seed-catalog → enrich-tmdb → index-catalog (Postgres is source of truth)
+# Seed ML-25m into Postgres:          docker compose --profile catalog up --build seed-catalog
+# TMDB enrichment into Postgres:      docker compose --profile catalog up --build enrich-tmdb
+# Index Postgres catalog to OpenSearch: docker compose --profile catalog up --build index-catalog
 # Sync API catalog to OpenSearch:      docker compose --profile catalog run --build index-sync
 # Live catalog indexer (immediate sync): included in --profile api (catalog-indexer-api)
 # Recommender API:                     docker compose --profile api up --build recommender-api
@@ -246,6 +249,38 @@ services:
       - .env
       - ./services/consumer/.env.tags
 
+  seed-catalog:
+    <<: *indexing-image
+    container_name: seed-catalog
+    profiles:
+      - catalog
+    restart: "no"
+    env_file:
+      - .env
+      - ./services/indexing/.env
+    command: ["python", "src/seed_catalog.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  enrich-tmdb:
+    <<: *indexing-image
+    container_name: enrich-tmdb
+    profiles:
+      - catalog
+    restart: "no"
+    env_file:
+      - .env
+      - ./services/indexing/.env
+    command: ["python", "src/enrich_tmdb.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
   index-catalog:
     <<: *indexing-image
     container_name: index-catalog
@@ -257,6 +292,10 @@ services:
       - ./services/indexing/.env
     command: ["python", "src/run_pipeline.py"]
     depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       opensearch:
         condition: service_healthy
       embedder:
@@ -287,6 +326,10 @@ services:
       - ./services/indexing/.env
     command: ["python", "src/load_movies_to_opensearch.py"]
     depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       opensearch:
         condition: service_healthy
       embedder:

@@ -8,6 +8,9 @@ from opensearchpy import OpenSearch
 
 from config import RecommenderApiConfig
 from clients.embedder import EmbedderClient
+from shared.features.hit import movie_hit_from_source
+from shared.features.constants import LEXICAL_SEARCH_FIELDS
+from shared.features.similar_search import build_similar_search_query
 
 
 def search_movies(client: OpenSearch, config: RecommenderApiConfig, q: str, genre: str | None = None, \
@@ -15,6 +18,7 @@ def search_movies(client: OpenSearch, config: RecommenderApiConfig, q: str, genr
                     size: int = 10) -> list[dict[str, Any]]:
     """
     Search the movie index in OpenSearch using text search and optional filters.
+    This is Lexical Search.
 
     The function searches across title-related fields when a non-empty query
     string is provided. Optional genre and year filters can be applied to narrow
@@ -39,14 +43,14 @@ def search_movies(client: OpenSearch, config: RecommenderApiConfig, q: str, genr
     # The conditions in the "must" list must match for a document to be returned.
     must = []
 
-    # If there is query text after removing whitespace, the returned results will 
-    # be limited to the movies that match the query in the title, clean_title, and search_text fields.
+    # If there is query text after removing whitespace, the returned results will
+    # be limited to movies that match the query in LEXICAL_SEARCH_FIELDS.
     if q.strip():
         must.append(
             {
                 "multi_match": {
                     "query": q,
-                    "fields": ["title", "clean_title", "search_text"],
+                    "fields": LEXICAL_SEARCH_FIELDS,
                 }
             }
         )
@@ -92,67 +96,47 @@ def search_movies(client: OpenSearch, config: RecommenderApiConfig, q: str, genr
     else:
         query = {"match_all": {}}
 
-    # Execute the search query.
     response = client.search(
         index=config.movies_alias,
         body={"size": size, "query": query},
     )
-
-    # Extract the results from the response and store them in a list.
-    results = []
-    # Iterate over the hits in the response.
-    for hit in response["hits"]["hits"]:
-        # Get the source of the hit.
-        source = hit["_source"]
-        # Append the movie ID, title, year, genres, and score to the results list.
-        results.append(
-            {
-                "movie_id": source.get("movie_id"),
-                "title": source.get("title"),
-                "year": source.get("year"),
-                "genres": source.get("genres", []),
-                "score": hit.get("_score"),
-            }
-        )
-    return results
+    return _parse_hits(response)
 
 
 def _parse_hits(response: dict[str, Any]) -> list[dict[str, Any]]:
     """
-    Parse the hits from the OpenSearch response and return a list of dictionaries
-    containing the movie ID, title, year, genres, and score.
+    Parse OpenSearch hits into movie hit dicts for API responses.
 
     ============================ Arguments ============================
     response: The OpenSearch response containing the hits.
 
     ============================ Returns ============================
-    A list of dictionaries, where each dictionary contains the movie ID, title,
-    release year, genres, and OpenSearch relevance score.
+    List of movie hits with indexed display fields and relevance score.
     """
-    results = []
-    # Iterate over the hits in the response.
-    for hit in response["hits"]["hits"]:
-        source = hit["_source"]
-        results.append(
-            {
-                "movie_id": source.get("movie_id"),
-                "title": source.get("title"),
-                "year": source.get("year"),
-                "genres": source.get("genres", []),
-                "score": hit.get("_score"),
-            }
-        )
-    return results
+    return [
+        movie_hit_from_source(hit["_source"], hit.get("_score"))
+        for hit in response["hits"]["hits"]
+    ]
 
 
-def search_similar_by_vector(client: OpenSearch, config: RecommenderApiConfig, \
-                                vector: list[float], size: int = 10) -> list[dict[str, Any]]:
+def _resolve_min_vote_count(
+    config: RecommenderApiConfig,
+    min_vote_count: int | None,
+) -> int:
+    if min_vote_count is not None:
+        return min_vote_count
+    return config.similar_min_vote_count
+
+
+def search_similar_by_vector(client: OpenSearch, config: RecommenderApiConfig, vector: list[float], size: int = 10, \
+                            *, genre: str | None = None, min_vote_count: int | None = None) -> list[dict[str, Any]]:
     """
     Find movies nearest to a query vector using OpenSearch kNN search.
+    This is (Semantic) Vector Search.
 
     Do this by:
     1. Checking if the vector dimension matches the expected dimension.
-    2. Running the kNN search with the vector.
+    2. Running kNN inside function_score with optional genre/vote filters.
     3. Parsing the hits from the response and returning a list of dictionaries
     containing the movie ID, title, year, genres, and score.
 
@@ -161,35 +145,42 @@ def search_similar_by_vector(client: OpenSearch, config: RecommenderApiConfig, \
     config: Recommender API configuration with the movies alias.
     vector: Query embedding vector.
     size: Maximum number of neighbors to return.
+    genre: Optional exact genre filter.
+    min_vote_count: Optional vote floor override; 0 disables the gate.
 
     ============================ Returns ============================
     Ranked movie hits with similarity scores.
     """
+    # Check if the vector dimension matches the expected dimension.
     if len(vector) != config.embedding_dimension:
         raise ValueError(
             f"Vector dimension {len(vector)} does not match "
             f"expected {config.embedding_dimension}"
         )
 
+    # Calculate the maximum number of neighbors to return.
+    knn_k = max(size, config.similar_knn_candidates)
+    
+    query = build_similar_search_query(
+        vector,
+        knn_k=knn_k,
+        genre=genre,
+        min_vote_count=_resolve_min_vote_count(config, min_vote_count),
+        popularity_factor=config.similar_popularity_factor,
+        vote_average_factor=config.similar_vote_average_factor,
+    )
+
+    # Execute the search query.
     response = client.search(
         index=config.movies_alias,
-        body={
-            "size": size,
-            "query": {
-                "knn": {
-                    "embedding": {
-                        "vector": vector,
-                        "k": size,
-                    }
-                }
-            },
-        },
+        body={"size": size, "query": query},
     )
+    # Parse the hits from the response and return a list of dictionaries containing the movie ID, title, year, genres, and score.
     return _parse_hits(response)
 
 
-def search_similar_by_text(client: OpenSearch, config: RecommenderApiConfig, \
-                            embedder: EmbedderClient, q: str, size: int = 10) -> list[dict[str, Any]]:
+def search_similar_by_text(client: OpenSearch, config: RecommenderApiConfig, embedder: EmbedderClient, q: str, size: int = 10, \
+                            *, genre: str | None = None, min_vote_count: int | None = None) -> list[dict[str, Any]]:
     """
     Embed query text and run kNN search for similar movies.
 
@@ -203,16 +194,25 @@ def search_similar_by_text(client: OpenSearch, config: RecommenderApiConfig, \
     embedder: Client for the embedder HTTP API.
     q: Free-text query to find semantically similar movies.
     size: Maximum number of neighbors to return.
+    genre: Optional exact genre filter.
+    min_vote_count: Optional vote floor override; 0 disables the gate.
 
     ============================ Returns ============================
     Ranked movie hits with similarity scores.
     """
     vectors = embedder.embed_texts([q.strip()])
-    return search_similar_by_vector(client, config, vectors[0], size=size)
+    return search_similar_by_vector(
+        client,
+        config,
+        vectors[0],
+        size=size,
+        genre=genre,
+        min_vote_count=min_vote_count,
+    )
 
 
-def search_similar_by_movie_id(client: OpenSearch, config: RecommenderApiConfig, embedder: EmbedderClient, \
-                                movie_id: int, size: int = 10) -> list[dict[str, Any]]:
+def search_similar_by_movie_id(client: OpenSearch, config: RecommenderApiConfig, embedder: EmbedderClient, movie_id: int, size: int = 10, \
+                                *, genre: str | None = None, min_vote_count: int | None = None) -> list[dict[str, Any]]:
     """
     Find movies similar to an indexed movie by its stored embedding.
 
@@ -227,6 +227,8 @@ def search_similar_by_movie_id(client: OpenSearch, config: RecommenderApiConfig,
     embedder: Client for the embedder HTTP API.
     movie_id: Source movie id for neighbor search.
     size: Maximum number of neighbors to return.
+    genre: Optional exact genre filter.
+    min_vote_count: Optional vote floor override; 0 disables the gate.
 
     ============================ Returns ============================
     Ranked movie hits excluding the source movie.
@@ -256,8 +258,14 @@ def search_similar_by_movie_id(client: OpenSearch, config: RecommenderApiConfig,
             )
         vector = embedder.embed_texts([embedding_text])[0]
 
-    # Run the kNN search with the vector.
-    hits = search_similar_by_vector(client, config, vector, size=size + 1)
+    hits = search_similar_by_vector(
+        client,
+        config,
+        vector,
+        size=size + 1,
+        genre=genre,
+        min_vote_count=min_vote_count,
+    )
     # Return the hits excluding the source movie.
     return [hit for hit in hits if hit.get("movie_id") != movie_id][:size]
 

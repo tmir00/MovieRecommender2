@@ -19,9 +19,13 @@ def run_pipeline(config: IndexingConfig, logger: logging.Logger) -> None:
     """
     Run the full catalog indexing pipeline.
 
+    Prerequisites (run separately before this job):
+    - seed-catalog: load movies.csv + links.csv into catalog_movies
+    - enrich-tmdb: fetch TMDB metadata into catalog_movies
+
     This function orchestrates the entire movie catalog indexing process, including:
     - Creating the versioned OpenSearch index
-    - Bulk loading movie documents into the index
+    - Bulk loading movie documents from catalog_movies into the index
     - Promoting the alias to the new index
     - Running smoke tests to verify the index is working
     """

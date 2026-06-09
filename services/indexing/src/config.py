@@ -40,6 +40,8 @@ class IndexingConfig:
     embedding_model_id: str
     embedding_dimension: int
     embed_batch_size: int
+    # CSV paths used by seed-catalog only.
+    links_csv_path: str
 
     @property
     def physical_index(self) -> str:
@@ -76,6 +78,10 @@ class IndexingConfig:
             ),
             embedding_dimension=int(os.environ.get("EMBEDDING_DIMENSION", "384")),
             embed_batch_size=int(os.environ.get("EMBED_BATCH_SIZE", "32")),
+            links_csv_path=os.environ.get(
+                "LINKS_CSV_PATH",
+                "/data/ml-25m/links.csv",
+            ),
         )
 
     def startup_log_extra(self) -> dict[str, Any]:

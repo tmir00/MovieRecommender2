@@ -10,6 +10,8 @@ from embedder_client import EmbedderClient
 from fastapi import APIRouter, HTTPException
 from index_movie import index_movie_document
 from shared.db.catalog import fetch_catalog_movie_by_id, mark_catalog_movies_synced
+from shared.features.adapters.postgres import row_to_catalog_input
+from shared.tmdb.models import tmdb_metadata_from_catalog_row
 
 
 class IndexMovieResponse(BaseModel):
@@ -65,16 +67,16 @@ def create_live_index_router(config: IndexingConfig, engine: Engine, os_client: 
                 detail=f"Movie with movie_id={movie_id} not found in catalog_movies",
             )
 
+        # Convert the movie row to a catalog input.
+        catalog_input = row_to_catalog_input(row)
+
         # Index the movie document into the movies alias.
         synced, error = index_movie_document(
             os_client,
             config,
             embedder,
-            movie_id=int(row["movie_id"]),
-            title=row["title"],
-            genres=list(row["genres"] or []),
-            year=row["year"],
-            tags=list(row["tags"] or []),
+            catalog_input,
+            tmdb=tmdb_metadata_from_catalog_row(row),
             pipeline_version=row["pipeline_version"],
         )
 

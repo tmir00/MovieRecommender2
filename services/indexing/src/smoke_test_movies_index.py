@@ -6,18 +6,26 @@ import os
 import sys
 import logging
 
-import pandas as pd
 from opensearchpy import OpenSearch
 
 from config import IndexingConfig
 from opensearch_client import get_opensearch_client
+from shared.db.catalog import count_active_catalog_movies
+from shared.db.engine import create_engine_from_url
+from shared.features.constants import LEXICAL_SEARCH_FIELDS
+from shared.features.similar_search import (
+    DEFAULT_SIMILAR_POPULARITY_FACTOR,
+    DEFAULT_SIMILAR_VOTE_AVERAGE_FACTOR,
+    build_similar_search_query,
+)
 from shared.logging_config import configure_logging
 
 
 def _expected_row_count(config: IndexingConfig) -> int:
     if config.max_movies > 0:
         return config.max_movies
-    return sum(1 for _ in pd.read_csv(config.movies_csv_path, usecols=["movieId"]))
+    engine = create_engine_from_url(config.database_url)
+    return count_active_catalog_movies(engine)
 
 
 def _read_index_name(config: IndexingConfig, client: OpenSearch) -> str:
@@ -60,7 +68,7 @@ def run_smoke_tests(config: IndexingConfig, logger: logging.Logger) -> None:
             "query": {
                 "multi_match": {
                     "query": "toy story",
-                    "fields": ["title", "clean_title", "search_text"],
+                    "fields": LEXICAL_SEARCH_FIELDS,
                 }
             },
         },
@@ -143,6 +151,49 @@ def run_smoke_tests(config: IndexingConfig, logger: logging.Logger) -> None:
         "kNN vector search smoke test passed",
         extra={"read_index": read_index, "knn_hits": len(knn_response["hits"]["hits"])},
     )
+
+    function_score_response = client.search(
+        index=read_index,
+        body={
+            "size": 3,
+            "query": build_similar_search_query(
+                embedding,
+                knn_k=50,
+                popularity_factor=DEFAULT_SIMILAR_POPULARITY_FACTOR,
+                vote_average_factor=DEFAULT_SIMILAR_VOTE_AVERAGE_FACTOR,
+            ),
+        },
+    )
+    if not function_score_response["hits"]["hits"]:
+        raise RuntimeError("function_score kNN smoke test returned no hits")
+
+    logger.info(
+        "function_score kNN smoke test passed",
+        extra={
+            "read_index": read_index,
+            "hits": len(function_score_response["hits"]["hits"]),
+        },
+    )
+
+    sample_source = sample_hits[0]["_source"]
+    if "search_text" in sample_source:
+        raise RuntimeError("Sample document still contains deprecated search_text field")
+
+    if sample_source.get("tmdb_id") is not None:
+        if "popularity" not in sample_source:
+            raise RuntimeError("Sample doc with tmdb_id is missing popularity field")
+        if "vote_count" not in sample_source:
+            raise RuntimeError("Sample doc with tmdb_id is missing vote_count field")
+        if "overview" not in sample_source:
+            raise RuntimeError("Sample doc with tmdb_id is missing overview field")
+        logger.info(
+            "TMDB lexical + scalar fields smoke test passed",
+            extra={
+                "read_index": read_index,
+                "tmdb_id": sample_source.get("tmdb_id"),
+                "has_tagline": "tagline" in sample_source,
+            },
+        )
 
 
 def main() -> None:

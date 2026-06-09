@@ -22,6 +22,11 @@ class RecommenderApiConfig:
     catalog_indexer_url: str
     embedder_url: str
     embedding_dimension: int
+    # OpenSearch Vector Search Config.
+    similar_min_vote_count: int # Minimum TMDB vote count before we consider the movie.
+    similar_knn_candidates: int # Maximum number of neighbors to return.
+    similar_popularity_factor: float # Popularity factor for boosting the score.
+    similar_vote_average_factor: float # Vote average factor for boosting the score.
 
     @classmethod
     def from_env(cls) -> RecommenderApiConfig:
@@ -38,4 +43,12 @@ class RecommenderApiConfig:
             ),
             embedder_url=os.environ.get("EMBEDDER_URL", "http://embedder:8100"),
             embedding_dimension=int(os.environ.get("EMBEDDING_DIMENSION", "384")),
+            similar_min_vote_count=int(os.environ.get("SIMILAR_MIN_VOTE_COUNT", "50")),
+            similar_knn_candidates=int(os.environ.get("SIMILAR_KNN_CANDIDATES", "50")),
+            similar_popularity_factor=float(
+                os.environ.get("SIMILAR_POPULARITY_FACTOR", "0.05")
+            ),
+            similar_vote_average_factor=float(
+                os.environ.get("SIMILAR_VOTE_AVERAGE_FACTOR", "0.1")
+            ),
         )
