@@ -1,0 +1,21 @@
+# Dev image for the Kafka → Postgres consumer.
+# Build context: ./services (see docker-compose.yml).
+
+FROM python:3.12-slim-bookworm
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app
+
+COPY consumer/requirements.txt ./consumer/
+RUN pip install --no-cache-dir -r consumer/requirements.txt
+
+COPY consumer/alembic.ini consumer/alembic/ ./consumer/
+COPY consumer/src/ ./consumer/src/
+COPY shared/ ./shared/
+
+WORKDIR /app/consumer
+
+CMD ["python", "src/consumer.py"]

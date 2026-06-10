@@ -1,10 +1,20 @@
-# Local stack: Kafka broker + dataset producers (dev).
-# Config: root `.env` (infra/Kafka) + `services/producer/.env.ratings` / `.env.tags`
+# Local stack: Kafka + Postgres + OpenSearch + producers + consumer + catalog indexer (dev).
+# Config: root `.env` (infra/Kafka/Postgres) + per-service env under `services/*/`
 # Copy from `.env.*.example` files before first run.
 #
-# Run both streams:  docker compose --profile stream up --build
-# Ratings only:       docker compose --profile ratings up --build
-# Tags only:          docker compose --profile tags up --build
+# Run stack + consumer:  docker compose --profile stream up --build
+# Ratings only:         docker compose --profile ratings up --build
+# Tags only:            docker compose --profile tags up --build
+# Catalog pipeline: seed-catalog → enrich-tmdb → rollup-tags → index-catalog (Postgres is source of truth)
+# Seed ML-25m into Postgres:          docker compose --profile catalog up --build seed-catalog
+# TMDB enrichment into Postgres:      docker compose --profile catalog up --build enrich-tmdb
+# Index Postgres catalog to OpenSearch: docker compose --profile catalog up --build index-catalog
+# Sync API catalog to OpenSearch:      docker compose --profile catalog run --build index-sync
+# Live catalog indexer (immediate sync): included in --profile api (catalog-indexer-api)
+# Recommender API:                     docker compose --profile api up --build recommender-api
+#   (run index-catalog first so the `movies` alias exists; run migrate for catalog_movies table)
+# Migrations run automatically via the `migrate` service before consumers start.
+# Consumer health: Compose probes GET /health/live (see services/consumer/.env.example for K8s mapping).
 
 x-producer: &producer
   build:
@@ -21,6 +31,86 @@ x-producer: &producer
     - ./datasets:/data:ro
   networks:
     - movierec
+
+x-consumer-image: &consumer-image
+  build:
+    context: ./services
+    dockerfile: consumer/docker/Dockerfile.dev
+  environment:
+    PYTHONPATH: /app
+    POSTGRES_HOST: postgres
+    DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-movierec}:${POSTGRES_PASSWORD:-movierec}@postgres:5432/${POSTGRES_DB:-movierec}
+    HEALTH_PORT: "8080"
+  volumes:
+    - ./services/consumer/src:/app/consumer/src:ro
+    - ./services/consumer/alembic:/app/consumer/alembic:ro
+    - ./services/shared:/app/shared:ro
+  networks:
+    - movierec
+
+x-indexing-image: &indexing-image
+  build:
+    context: ./services
+    dockerfile: indexing/docker/Dockerfile.dev
+  environment:
+    PYTHONPATH: /app
+    DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-movierec}:${POSTGRES_PASSWORD:-movierec}@postgres:5432/${POSTGRES_DB:-movierec}
+  volumes:
+    - ./services/indexing/src:/app/indexing/src:ro
+    - ./services/shared:/app/shared:ro
+    - ./datasets:/data:ro
+  networks:
+    - movierec
+
+x-recommender-api: &recommender-api
+  build:
+    context: ./services
+    dockerfile: recommender-api/docker/Dockerfile.dev
+  environment:
+    PYTHONPATH: /app
+    DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-movierec}:${POSTGRES_PASSWORD:-movierec}@postgres:5432/${POSTGRES_DB:-movierec}
+  ports:
+    - "${RECOMMENDER_API_HOST_PORT:-8000}:8000"
+  volumes:
+    - ./services/recommender-api/src:/app/recommender-api/src:ro
+    - ./services/shared:/app/shared:ro
+  networks:
+    - movierec
+
+x-embedder: &embedder
+  build:
+    context: ./services
+    dockerfile: embedder/docker/Dockerfile.dev
+  environment:
+    PYTHONPATH: /app
+  volumes:
+    - ./services/embedder/src:/app/embedder/src:ro
+    - embedder_model_cache:/root/.cache/huggingface
+  networks:
+    - movierec
+
+x-consumer: &consumer
+  <<: *consumer-image
+  restart: unless-stopped
+  expose:
+    - "8080"
+  healthcheck:
+    test:
+      [
+        "CMD-SHELL",
+        "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health/live')\"",
+      ]
+    interval: 30s
+    timeout: 5s
+    retries: 3
+    start_period: 45s
+  depends_on:
+    kafka:
+      condition: service_healthy
+    postgres:
+      condition: service_healthy
+    migrate:
+      condition: service_completed_successfully
 
 services:
   kafka:
@@ -43,6 +133,84 @@ services:
     networks:
       - movierec
 
+  postgres:
+    image: postgres:17-alpine
+    container_name: postgres
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-movierec}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-movierec}
+      POSTGRES_DB: ${POSTGRES_DB:-movierec}
+    ports:
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - movierec
+
+  opensearch:
+    image: opensearchproject/opensearch:2.19.1
+    container_name: opensearch
+    env_file:
+      - .env
+    environment:
+      cluster.name: movierec-opensearch
+      node.name: opensearch
+      discovery.type: single-node
+      # Docker Desktop on Windows/macOS cannot use memlock reliably.
+      bootstrap.memory_lock: "false"
+      OPENSEARCH_JAVA_OPTS: ${OPENSEARCH_JAVA_OPTS:--Xms512m -Xmx512m}
+      DISABLE_SECURITY_PLUGIN: ${OPENSEARCH_DISABLE_SECURITY_PLUGIN:-true}
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "${OPENSEARCH_HOST_PORT:-9200}:9200"
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s || exit 1",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 8
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - movierec
+
+  migrate:
+    <<: *consumer-image
+    container_name: migrate
+    profiles:
+      - stream
+      - ratings
+      - tags
+      - api
+      - catalog
+    restart: "no"
+    env_file:
+      - .env
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   producer-ratings:
     <<: *producer
     container_name: producer-ratings
@@ -61,6 +229,211 @@ services:
     env_file:
       - ./services/producer/.env.tags
 
+  consumer-ratings:
+    <<: *consumer
+    container_name: consumer-ratings
+    profiles:
+      - stream
+      - ratings
+    env_file:
+      - .env
+      - ./services/consumer/.env.ratings
+
+  consumer-tags:
+    <<: *consumer
+    container_name: consumer-tags
+    profiles:
+      - stream
+      - tags
+    env_file:
+      - .env
+      - ./services/consumer/.env.tags
+
+  seed-catalog:
+    <<: *indexing-image
+    container_name: seed-catalog
+    profiles:
+      - catalog
+    restart: "no"
+    env_file:
+      - .env
+      - ./services/indexing/.env
+    command: ["python", "src/seed_catalog.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  enrich-tmdb:
+    <<: *indexing-image
+    container_name: enrich-tmdb
+    profiles:
+      - catalog
+    restart: "no"
+    env_file:
+      - .env
+      - ./services/indexing/.env
+    command: ["python", "src/enrich_tmdb.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  rollup-tags:
+    <<: *indexing-image
+    container_name: rollup-tags
+    profiles:
+      - catalog
+    restart: "no"
+    env_file:
+      - .env
+      - ./services/indexing/.env
+    command: ["python", "src/rollup_tags.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  index-catalog:
+    <<: *indexing-image
+    container_name: index-catalog
+    profiles:
+      - catalog
+    restart: "no"
+    env_file:
+      - .env
+      - ./services/indexing/.env
+    command: ["python", "src/run_pipeline.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      opensearch:
+        condition: service_healthy
+      embedder:
+        condition: service_started
+
+  create-movie-index:
+    <<: *indexing-image
+    container_name: create-movie-index
+    profiles:
+      - catalog
+    restart: "no"
+    env_file:
+      - .env
+      - ./services/indexing/.env
+    command: ["python", "src/create_movies_index.py"]
+    depends_on:
+      opensearch:
+        condition: service_healthy
+
+  index-movies:
+    <<: *indexing-image
+    container_name: index-movies
+    profiles:
+      - catalog
+    restart: "no"
+    env_file:
+      - .env
+      - ./services/indexing/.env
+    command: ["python", "src/load_movies_to_opensearch.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      opensearch:
+        condition: service_healthy
+      embedder:
+        condition: service_started
+      create-movie-index:
+        condition: service_completed_successfully
+
+  index-sync:
+    <<: *indexing-image
+    container_name: index-sync
+    profiles:
+      - catalog
+    restart: "no"
+    env_file:
+      - .env
+      - ./services/indexing/.env
+    command: ["python", "src/run_sync_pipeline.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      embedder:
+        condition: service_started
+
+  embedder:
+    <<: *embedder
+    container_name: embedder
+    profiles:
+      - api
+      - catalog
+    restart: unless-stopped
+    env_file:
+      - ./services/embedder/.env.example
+    command: ["python", "src/main.py"]
+    expose:
+      - "8100"
+
+  catalog-indexer-api:
+    <<: *indexing-image
+    container_name: catalog-indexer-api
+    profiles:
+      - api
+    restart: unless-stopped
+    env_file:
+      - .env
+      - ./services/indexing/.env
+    command: ["python", "src/api/main.py"]
+    expose:
+      - "8101"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      embedder:
+        condition: service_started
+
+  recommender-api:
+    <<: *recommender-api
+    container_name: recommender-api
+    profiles:
+      - api
+    restart: unless-stopped
+    env_file:
+      - .env
+      - ./services/recommender-api/.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      catalog-indexer-api:
+        condition: service_started
+      embedder:
+        condition: service_started
+
 networks:
   movierec:
     driver: bridge
+
+volumes:
+  postgres_data:
+  opensearch_data:
+  embedder_model_cache:
