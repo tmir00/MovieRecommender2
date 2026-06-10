@@ -42,6 +42,9 @@ class IndexingConfig:
     embed_batch_size: int
     # CSV paths used by seed-catalog only.
     links_csv_path: str
+    # Tag rollup job settings (rollup-tags).
+    tag_rollup_top_n: int
+    tag_rollup_batch_size: int
 
     @property
     def physical_index(self) -> str:
@@ -82,6 +85,8 @@ class IndexingConfig:
                 "LINKS_CSV_PATH",
                 "/data/ml-25m/links.csv",
             ),
+            tag_rollup_top_n=int(os.environ.get("TAG_ROLLUP_TOP_N", "15")),
+            tag_rollup_batch_size=int(os.environ.get("TAG_ROLLUP_BATCH_SIZE", "500")),
         )
 
     def startup_log_extra(self) -> dict[str, Any]:

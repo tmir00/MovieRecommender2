@@ -113,7 +113,17 @@ def run_smoke_tests(config: IndexingConfig, logger: logging.Logger) -> None:
     if not sample_hits:
         raise RuntimeError("Embedding smoke test could not sample a document")
 
-    embedding = sample_hits[0]["_source"].get("embedding")
+    sample_source = sample_hits[0]["_source"]
+    sample_tags = sample_source.get("tags") or []
+    logger.info(
+        "Sample document tags check",
+        extra={
+            "read_index": read_index,
+            "has_tags": bool(sample_tags),
+        },
+    )
+
+    embedding = sample_source.get("embedding")
     if not embedding:
         raise RuntimeError("Sample document is missing embedding field")
     if len(embedding) != config.embedding_dimension:

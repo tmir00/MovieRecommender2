@@ -5,7 +5,7 @@
 # Run stack + consumer:  docker compose --profile stream up --build
 # Ratings only:         docker compose --profile ratings up --build
 # Tags only:            docker compose --profile tags up --build
-# Catalog pipeline: seed-catalog → enrich-tmdb → index-catalog (Postgres is source of truth)
+# Catalog pipeline: seed-catalog → enrich-tmdb → rollup-tags → index-catalog (Postgres is source of truth)
 # Seed ML-25m into Postgres:          docker compose --profile catalog up --build seed-catalog
 # TMDB enrichment into Postgres:      docker compose --profile catalog up --build enrich-tmdb
 # Index Postgres catalog to OpenSearch: docker compose --profile catalog up --build index-catalog
@@ -275,6 +275,22 @@ services:
       - .env
       - ./services/indexing/.env
     command: ["python", "src/enrich_tmdb.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  rollup-tags:
+    <<: *indexing-image
+    container_name: rollup-tags
+    profiles:
+      - catalog
+    restart: "no"
+    env_file:
+      - .env
+      - ./services/indexing/.env
+    command: ["python", "src/rollup_tags.py"]
     depends_on:
       postgres:
         condition: service_healthy

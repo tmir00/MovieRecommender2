@@ -1,0 +1,1 @@
+{"size":3,"query":{"multi_match":{"query":"pixar","fields":["tags^1"]}}}
